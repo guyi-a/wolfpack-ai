@@ -1,0 +1,9 @@
+{
+  "models": [
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
+    "xiaomimimo/mimo-v2.5-pro",
+    "zai-org/glm-5.1",
+    "pa/claude-opus-4-7"
+  ]
+}

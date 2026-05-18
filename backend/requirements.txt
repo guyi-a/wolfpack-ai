@@ -1,0 +1,25 @@
+# =============================================================================
+# Wolfpack AI - 框架可行性试验阶段最小依赖集
+# =============================================================================
+# 安装:
+#   source backend/venv/bin/activate
+#   pip install -r backend/requirements.txt
+#
+# 已选定 LangChain / LangGraph 作为主框架 (见 docs/技术选型总结.md)
+#
+# 后续阶段需要时再加:
+#   - Web 服务 (fastapi/uvicorn) → backend/api 启动时
+#   - 持久化 (sqlalchemy/alembic) → 评测/Leaderboard 时
+#   - 观测 (langfuse) → 想做 trace 时
+#   - 文档处理/RAG/OCR/MCP → 进阶方向真用上时
+# =============================================================================
+
+# ---------- 通用 ----------
+python-dotenv>=1.0.1
+
+# ---------- LangChain / LangGraph (主框架) ----------
+langchain>=1.2.13
+langchain-anthropic>=0.3.0          # 走 Novita Anthropic 端点 (默认)
+langchain-openai>=1.1.2             # 走 Novita OpenAI 端点 (备用,L4 supervisor 可能用)
+langgraph>=0.3.0
+langgraph-supervisor>=0.0.1         # supervisor 多 Agent 模式
