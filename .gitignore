@@ -39,6 +39,7 @@ data/
 *.db
 *.log
 logs/
+backend/wolfpack-data/
 
 # 日志 / trace
 .langsmith/

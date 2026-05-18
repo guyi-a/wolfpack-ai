@@ -112,6 +112,9 @@ def _build_god_tools(ctx: GodContext):
                 return {"error": "game already ended"}
             if s.round == 0 or s.phase.name == "DAY_VOTE":
                 s.start_round()
+            # 第一个夜阶段, 同时发"夜晚开始"信号
+            ctx.board.append_phase_change(s.round, "night_start")
+            ctx.board.append_phase_change(s.round, "wolf_night")
             wolves = [
                 p for p in ctx.players.values() if isinstance(p, Wolf) and s.get(p.player_id).alive
             ]
@@ -131,6 +134,7 @@ def _build_god_tools(ctx: GodContext):
             seer = next((p for p in ctx.players.values() if isinstance(p, Seer) and s.get(p.player_id).alive), None)
             if seer is None:
                 return {"skipped": "no seer alive"}
+            ctx.board.append_phase_change(s.round, "seer_night")
             phase = SeerNightPhase(seer=seer, game_round=s.round, alive_ids=s.alive_ids())
             result = phase.run()
             ctx.last_phase_result = result.payload
@@ -140,6 +144,7 @@ def _build_god_tools(ctx: GodContext):
             witch = next((p for p in ctx.players.values() if isinstance(p, Witch) and s.get(p.player_id).alive), None)
             if witch is None:
                 return {"skipped": "no witch alive"}
+            ctx.board.append_phase_change(s.round, "witch_night")
             phase = WitchNightPhase(
                 witch=witch,
                 game_round=s.round,
@@ -153,6 +158,9 @@ def _build_god_tools(ctx: GodContext):
             return {"save": result.payload["save"], "poison_target": result.payload["poison_target"]}
 
         if name == "night_announce":
+            # 夜结束, 进入白天: 先发"白天开始"信号, 再走 NightAnnouncePhase 发死亡公告
+            ctx.board.append_phase_change(s.round, "day_start")
+            ctx.board.append_phase_change(s.round, "night_announce")
             phase = NightAnnouncePhase(state=s, board=ctx.board)
             result = phase.run()
             ctx.last_phase_result = result.payload
@@ -160,6 +168,9 @@ def _build_god_tools(ctx: GodContext):
 
         if name == "last_words_killed":
             deaths = list(s.deaths_announced_today)
+            if not deaths:
+                return {"spoken": []}
+            ctx.board.append_phase_change(s.round, "last_words_killed")
             spoken = []
             for pid in deaths:
                 if pid not in ctx.players:
@@ -175,6 +186,7 @@ def _build_god_tools(ctx: GodContext):
             return {"spoken": spoken}
 
         if name == "day_speech":
+            ctx.board.append_phase_change(s.round, "day_speech")
             speakers = [ctx.players[pid] for pid in s.alive_ids() if pid in ctx.players]
             phase = DaySpeechPhase(speakers=speakers, board=ctx.board, game_round=s.round)
             result = phase.run()
@@ -182,6 +194,7 @@ def _build_god_tools(ctx: GodContext):
             return {"speech_count": len(result.payload["speeches"])}
 
         if name == "day_vote":
+            ctx.board.append_phase_change(s.round, "day_vote")
             voters = [ctx.players[pid] for pid in s.alive_ids() if pid in ctx.players]
             phase = DayVotePhase(
                 voters=voters,
@@ -199,10 +212,10 @@ def _build_god_tools(ctx: GodContext):
             }
 
         if name == "last_words_voted":
-            # 取昨夜结算遗留的 eliminated_today
             loser = s.eliminated_today
             if not loser or loser not in ctx.players:
                 return {"skipped": "no one voted out"}
+            ctx.board.append_phase_change(s.round, "last_words_voted")
             phase = LastWordsPhase(
                 dying=ctx.players[loser],
                 board=ctx.board,

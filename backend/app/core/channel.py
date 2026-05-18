@@ -16,8 +16,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Iterable, Literal, Optional
+from typing import Callable, Iterable, Literal, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 EventKind = Literal[
@@ -29,6 +33,11 @@ EventKind = Literal[
     "phase_change",
     "game_end",
 ]
+
+
+# 一个 sink 是 "Channel 写入时通知谁" 的回调.
+# 第一版常见 sink: SQLite 落库 / EventBus.publish.
+ChannelSink = Callable[["Channel", "ChannelEvent"], None]
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +59,7 @@ class Channel:
     name: str
     members: list[str] = field(default_factory=list)
     events: list[ChannelEvent] = field(default_factory=list)
+    sinks: list[ChannelSink] = field(default_factory=list)
 
     # ------------------------------------------ 工厂方法 (常见频道)
 
@@ -90,10 +100,28 @@ class Channel:
                 out.append(e)
         return out
 
+    # ------------------------------------------ sink 管理
+
+    def add_sink(self, sink: ChannelSink) -> None:
+        """注册一个写入回调. Channel 每次 append 都会同步调一遍.
+
+        sink 异常不会向上抛, 仅打日志, 避免拖垮对局主流程.
+        典型用法: SQLite 落库 / EventBus.publish.
+        """
+        self.sinks.append(sink)
+
+    def _notify(self, event: ChannelEvent) -> None:
+        for sink in self.sinks:
+            try:
+                sink(self, event)
+            except Exception:
+                logger.exception("channel %r sink failed", self.name)
+
     # ------------------------------------------ 写 (便捷方法, 语义化)
 
     def append(self, event: ChannelEvent) -> None:
         self.events.append(event)
+        self._notify(event)
 
     def append_speech(self, round: int, speaker: str, text: str) -> None:
         self.append(ChannelEvent("speech", round, {"speaker": speaker, "text": text}))

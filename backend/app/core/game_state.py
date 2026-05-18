@@ -42,6 +42,8 @@ class PlayerInfo:
     player_id: str
     role: Role
     alive: bool = True
+    died_at_round: Optional[int] = None
+    death_cause: Optional[str] = None     # killed_at_night / voted_out / poisoned
 
     @property
     def camp(self) -> Camp:
@@ -117,8 +119,14 @@ class GameState:
 
     # ----------------------------------------------------------------- 写侧
 
-    def kill(self, player_id: str) -> None:
-        self.get(player_id).alive = False
+    def kill(self, player_id: str, *, cause: str) -> None:
+        """标记某 player 死亡, 记录 死因 + 第几轮死的 (round 取 state.round)."""
+        p = self.get(player_id)
+        p.alive = False
+        if p.died_at_round is None:
+            p.died_at_round = self.round
+        if p.death_cause is None:
+            p.death_cause = cause
 
     def start_round(self) -> None:
         """进入下一轮的夜晚. round +=1, phase 复位到 NIGHT, 清掉单轮暂存."""
@@ -133,22 +141,26 @@ class GameState:
         deaths: list[str] = []
         na = self.night_actions
         if na.wolf_kill_target and not na.witch_save:
-            self.kill(na.wolf_kill_target)
+            self.kill(na.wolf_kill_target, cause="killed_at_night")
             deaths.append(na.wolf_kill_target)
         if na.witch_poison_target:
-            self.kill(na.witch_poison_target)
+            self.kill(na.witch_poison_target, cause="poisoned")
             deaths.append(na.witch_poison_target)
         self.deaths_announced_today = list(deaths)
         self.phase = Phase.DAY_SPEECH
         return deaths
 
     def settle_vote(self, vote_loser: Optional[str]) -> None:
-        """白天投票结算: 出局玩家 (可能平票为 None)."""
+        """白天投票结算: 出局玩家 (可能平票为 None).
+
+        结算后 phase 保留为 DAY_VOTE (作为"本轮已结束"的信号),
+        下个 wolf_night 进来时 god 看到这个 phase 就 start_round 进入下一夜.
+        """
         if vote_loser:
-            self.kill(vote_loser)
+            self.kill(vote_loser, cause="voted_out")
             self.eliminated_today = vote_loser
             self.deaths_announced_today.append(vote_loser)
         if self.is_over():
             self.phase = Phase.ENDED
         else:
-            self.phase = Phase.NIGHT  # 等 start_round 推进到下一轮
+            self.phase = Phase.DAY_VOTE   # 留住, 等 start_round 推进到下一夜
