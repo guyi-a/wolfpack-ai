@@ -14,6 +14,7 @@
 """
 
 import sys
+import asyncio
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent
@@ -45,7 +46,7 @@ def setup_game() -> tuple[GameState, Channel]:
     return state, board
 
 
-def main():
+async def main():
     state, board = setup_game()
     print("=" * 72)
     print(f"6 人板初始: {[(p.player_id, p.role) for p in state.players]}")
@@ -65,7 +66,7 @@ def main():
         identities=identities,
         channels=[board],
     )
-    seer_action = seer.act("现在是第 1 夜, 你是预言家 3 号. 请查验 1 号玩家.")
+    seer_action = await seer.act("现在是第 1 夜, 你是预言家 3 号. 请查验 1 号玩家.")
     print(f"  [Seer 私有] {seer_action[:120]}")
 
     deaths = state.settle_night()
@@ -94,7 +95,7 @@ def main():
             f"昨晚死亡情况已经在公开记录里. "
             f"请用一句话发言, 不超过 30 字."
         )
-        speech = speaker.act(task)
+        speech = await speaker.act(task)
         board.append_speech(state.round, pid, speech)
         print(f"  [{pid}号] {speech}")
 
@@ -139,4 +140,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

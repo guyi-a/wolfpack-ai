@@ -28,6 +28,8 @@ from app.schemas.game import (
     GameEventOut,
     GameSummary,
     PlayerOut,
+    PrivateHistoryEntryOut,
+    PrivateHistoryOut,
 )
 
 
@@ -98,14 +100,14 @@ async def _run_game_async(game_id: int, runtime, max_rounds: int) -> None:
     """后台任务: 跑完整局, 跑完后 mark_ended / mark_aborted."""
     logger.info(f"[game {game_id}] 开始跑, max_rounds={max_rounds}")
     try:
-        result = await asyncio.to_thread(
-            play_game, runtime.god, runtime.state, max_rounds=max_rounds
+        result = await play_game(
+            runtime.god, runtime.state, max_rounds=max_rounds
         )
 
         async with AsyncSessionLocal() as db:
             game = await crud.get_game(db, game_id)
             if game is not None:
-                # 先把死者同步到 game_player 表
+                # 1. 同步死亡到 game_player
                 for p in runtime.state.players:
                     if not p.alive:
                         await crud.kill_player(
@@ -115,7 +117,11 @@ async def _run_game_async(game_id: int, runtime, max_rounds: int) -> None:
                             round_num=p.died_at_round or 0,
                             cause=p.death_cause or "unknown",
                         )
-                # 再 mark_ended
+                # 2. 归档每个 player + god 的私有 history
+                histories = _collect_histories(runtime)
+                rows = await crud.archive_private_histories(db, game_id, histories)
+                logger.info(f"[game {game_id}] 归档 private history {rows} 行")
+                # 3. mark_ended
                 await crud.mark_ended(
                     db, game,
                     winner=result["winner"],
@@ -127,10 +133,25 @@ async def _run_game_async(game_id: int, runtime, max_rounds: int) -> None:
         async with AsyncSessionLocal() as db:
             game = await crud.get_game(db, game_id)
             if game is not None:
+                # 异常退出也归档已有的 history (复盘异常局)
+                try:
+                    histories = _collect_histories(runtime)
+                    await crud.archive_private_histories(db, game_id, histories)
+                except Exception:
+                    logger.exception(f"[game {game_id}] 归档失败 (异常退出路径)")
                 await crud.mark_aborted(db, game, error=str(e))
     finally:
         runtime.bus.publish(None)
         drop_bus(f"game:{game_id}")
+
+
+def _collect_histories(runtime) -> dict:
+    """从 runtime 收集 player + god 的私有 history. 输出 {player_id: list[HistoryEntry]}."""
+    out: dict[str, list] = {}
+    for pid, player in runtime.players.items():
+        out[pid] = player.history()
+    out["god"] = runtime.god.history()
+    return out
 
 
 @router.get(
@@ -186,3 +207,45 @@ async def list_events(
     channels = [channel] if channel else None
     events = await crud.list_events(db, game_id, channels=channels)
     return [GameEventOut.model_validate(e) for e in events]
+
+
+@router.get(
+    "/{game_id}/players/{player_id}/history",
+    response_model=PrivateHistoryOut,
+    summary="拿某 player 的私有 history (内心戏复盘)",
+)
+async def get_player_history(
+    game_id: int,
+    player_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> PrivateHistoryOut:
+    game = await crud.get_game(db, game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail=f"game {game_id} not found")
+    entries = await crud.list_private_history(db, game_id, player_id)
+    return PrivateHistoryOut(
+        player_id=player_id,
+        entries=[PrivateHistoryEntryOut.model_validate(e) for e in entries],
+    )
+
+
+@router.get(
+    "/{game_id}/histories",
+    response_model=list[PrivateHistoryOut],
+    summary="拿该局所有 player 的私有 history (上帝复盘)",
+)
+async def get_all_histories(
+    game_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> list[PrivateHistoryOut]:
+    game = await crud.get_game(db, game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail=f"game {game_id} not found")
+    histories = await crud.list_all_private_histories(db, game_id)
+    return [
+        PrivateHistoryOut(
+            player_id=pid,
+            entries=[PrivateHistoryEntryOut.model_validate(e) for e in entries],
+        )
+        for pid, entries in histories.items()
+    ]

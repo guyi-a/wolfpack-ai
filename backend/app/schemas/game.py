@@ -105,3 +105,26 @@ class GameEventOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PrivateHistoryEntryOut(BaseModel):
+    """player 私有 history 一条 (复盘"内心戏"展示用)."""
+
+    seq: int
+    role: str
+    text: str
+    thinking: str
+    tool_calls: list[Any]
+    tool_call_id: str
+    name: str
+    round: int
+
+    class Config:
+        from_attributes = True
+
+
+class PrivateHistoryOut(BaseModel):
+    """某 player 的完整私有 history."""
+
+    player_id: str
+    entries: list[PrivateHistoryEntryOut]

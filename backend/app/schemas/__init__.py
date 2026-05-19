@@ -7,6 +7,8 @@ from app.schemas.game import (
     GameSummary,
     PlayerConfig,
     PlayerOut,
+    PrivateHistoryEntryOut,
+    PrivateHistoryOut,
     Role,
 )
 
@@ -17,5 +19,7 @@ __all__ = [
     "GameSummary",
     "PlayerConfig",
     "PlayerOut",
+    "PrivateHistoryEntryOut",
+    "PrivateHistoryOut",
     "Role",
 ]

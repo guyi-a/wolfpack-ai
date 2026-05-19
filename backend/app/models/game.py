@@ -1,9 +1,10 @@
 """SQLAlchemy 表定义 — 对局相关.
 
-三张表:
-  - game         : 对局元信息 (config snapshot, 状态, 胜负, 时间)
-  - game_player  : 每个 player 的配置 + 终态 (model, role, 存亡)
-  - game_event   : 所有公开事件 (board/wolf_chat 全部 ChannelEvent 落盘, 用于复盘 + 评测)
+四张表:
+  - game                    : 对局元信息 (config snapshot, 状态, 胜负, 时间)
+  - game_player             : 每个 player 的配置 + 终态 (model, role, 存亡)
+  - game_event              : 所有公开事件 (board/wolf_chat 全部 ChannelEvent 落盘, 用于复盘 + 评测)
+  - player_private_history  : 对局结束时归档每个 player (含 god) 的私有 history (thinking + 工具调用), 复盘内心戏用
 """
 
 import datetime as dt
@@ -126,3 +127,34 @@ class GameEvent(Base):
     )
 
     game: Mapped["Game"] = relationship(back_populates="events")
+
+
+class PlayerPrivateHistory(Base):
+    """对局结束时归档的"player 私有 LLM messages 流".
+
+    一行 = 内存里一条 HistoryEntry 的 SQLite 副本.
+    包括 thinking + tool_calls + tool_result + text.
+    player_id 同时承担 player 和 god ("1"/"2".../"god").
+
+    MVP: 仅在对局正常结束时 (mark_ended) 一次性 batch insert.
+    """
+
+    __tablename__ = "player_private_history"
+    __table_args__ = (
+        Index("ix_pph_game_player_seq", "game_id", "player_id", "seq"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    game_id: Mapped[int] = mapped_column(
+        ForeignKey("game.id", ondelete="CASCADE"), index=True
+    )
+
+    player_id: Mapped[str] = mapped_column(String(16))         # "1"/"2".../"god"
+    seq: Mapped[int] = mapped_column(Integer)                  # 该 player 内的顺序 (从 0 开始)
+    role: Mapped[str] = mapped_column(String(16))              # system/user/assistant/tool
+    text: Mapped[str] = mapped_column(Text, default="")
+    thinking: Mapped[str] = mapped_column(Text, default="")
+    tool_calls: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    tool_call_id: Mapped[str] = mapped_column(String(64), default="")
+    name: Mapped[str] = mapped_column(String(32), default="")  # role=tool 时的工具名
+    round: Mapped[int] = mapped_column(Integer, default=0)

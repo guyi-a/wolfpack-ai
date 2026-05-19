@@ -10,6 +10,7 @@
 """
 
 import sys
+import asyncio
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent
@@ -46,11 +47,11 @@ def test_multi_turn():
         history_store=store,
     )
 
-    r1 = p.act("我有 7 个苹果")
+    r1 = await p.act("我有 7 个苹果")
     print(f"\nturn1 → {r1!r}")
-    r2 = p.act("又拿到 5 个, 现在多少?")
+    r2 = await p.act("又拿到 5 个, 现在多少?")
     print(f"turn2 → {r2!r}")
-    r3 = p.act("吃掉一半, 还剩多少?")
+    r3 = await p.act("吃掉一半, 还剩多少?")
     print(f"turn3 → {r3!r}")
 
     dump_history(p, DEEPSEEK)
@@ -74,7 +75,7 @@ def test_cross_model(store: InMemoryHistoryStore):
         system_prompt="(忽略, 已有 system)",
         history_store=store,
     )
-    r4 = p.act("再买 10 个, 现在多少?")
+    r4 = await p.act("再买 10 个, 现在多少?")
     print(f"\nturn4 (model=claude) → {r4!r}")
 
     dump_history(p, CLAUDE)
@@ -92,7 +93,7 @@ def test_isolation_view():
         system_prompt="你是助手, 一句话回答.",
         history_store=store,
     )
-    p.act("写一句诗")
+    await p.act("写一句诗")
     # 第二轮调用前: 看看 adapter 会喂什么给模型 (模拟 act 内部)
     adapter = get_adapter(DEEPSEEK)
     entries = store.load("iso_p1")
@@ -115,11 +116,11 @@ def test_isolation_view():
           f"{has_thinking_in_msgs(full_msgs)} (应=True if deepseek 有思考)")
 
 
-def main():
+async def main():
     store = test_multi_turn()
     test_cross_model(store)
     test_isolation_view()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

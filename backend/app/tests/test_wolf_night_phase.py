@@ -11,6 +11,7 @@
 """
 
 import sys
+import asyncio
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent
@@ -26,7 +27,7 @@ from app.core.phase import WolfNightPhase
 MODEL = "deepseek/deepseek-v4-pro"
 
 
-def main():
+async def main():
     print("=" * 72)
     print("WolfNightPhase 测试: 2 狼 (1号, 4号), 候选目标 [2号, 3号, 5号, 6号]")
     print("=" * 72)
@@ -63,7 +64,7 @@ def main():
         rounds=2,
     )
 
-    result = phase.run()
+    result = await phase.run()
 
     print("\n--- 狼频道事件 ---")
     for ev in wolf_chat.all_events():
@@ -87,4 +88,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

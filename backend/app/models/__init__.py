@@ -4,6 +4,6 @@ alembic env.py 通过 `from app import models` 让 Base.metadata 知道有哪些
 加新表时在这里 re-export.
 """
 
-from app.models.game import Game, GameEvent, GamePlayer
+from app.models.game import Game, GameEvent, GamePlayer, PlayerPrivateHistory
 
-__all__ = ["Game", "GamePlayer", "GameEvent"]
+__all__ = ["Game", "GamePlayer", "GameEvent", "PlayerPrivateHistory"]

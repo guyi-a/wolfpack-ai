@@ -10,6 +10,7 @@
 """
 
 import sys
+import asyncio
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent
@@ -49,9 +50,9 @@ def test_villager():
     store = InMemoryHistoryStore()
     v = Villager(player_id="p3_villager", model_name=MODEL, history_store=store)
 
-    r1 = v.act("现在是第 1 天白天, 请你作为 3 号玩家做一段开场发言.")
+    r1 = await v.act("现在是第 1 天白天, 请你作为 3 号玩家做一段开场发言.")
     print(f"\n[发言1] {r1}")
-    r2 = v.act(
+    r2 = await v.act(
         "5 号玩家刚才跳预言家, 自报昨晚查 1 号是狼. "
         "现在轮到你 (3 号) 接着发言, 请基于这个信息表态."
     )
@@ -78,11 +79,11 @@ def test_seer():
         identities=identities,
     )
 
-    r1 = s.act("现在是第 1 天夜晚, 你是 3 号预言家, 请查验 1 号玩家.")
+    r1 = await s.act("现在是第 1 天夜晚, 你是 3 号预言家, 请查验 1 号玩家.")
     print(f"\n[夜1 action] {r1}")
-    r2 = s.act("现在是第 2 天夜晚, 请查验 4 号玩家.")
+    r2 = await s.act("现在是第 2 天夜晚, 请查验 4 号玩家.")
     print(f"\n[夜2 action] {r2}")
-    r3 = s.act(
+    r3 = await s.act(
         "现在是第 2 天白天发言, 请总结你这两晚查验的信息, "
         "然后给出你认为最可能是狼人的玩家编号."
     )
@@ -96,10 +97,10 @@ def test_seer():
     print(f"[校验] tool_result 数 = {len(tool_result_entries)} (应 ≥ 2)")
 
 
-def main():
+async def main():
     test_villager()
     test_seer()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

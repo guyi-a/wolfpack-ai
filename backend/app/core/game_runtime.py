@@ -45,10 +45,9 @@ class GameRuntime:
     state: GameState
     board: Channel
     wolf_chat: Channel
-    players: dict[str, Player]   # player_id → Player 实例
+    players: dict[str, Player]
     god: God
     bus: EventBus
-    # seq 计数器, 每局独立, 在 sink 闭包里维护
     _seq_counter: list[int] = field(default_factory=lambda: [0])
 
     def next_seq(self) -> int:
@@ -74,6 +73,7 @@ def _build_player(
     identities: dict[str, str],
     board: Channel,
     wolf_chat: Channel,
+    bus: Optional[EventBus] = None,
 ) -> Player:
     store = InMemoryHistoryStore()
     if role == "wolf":
@@ -84,6 +84,7 @@ def _build_player(
             teammates=teammates,
             channels=[wolf_chat, board],
             on_vote=_noop,
+            bus=bus,
         )
     if role == "witch":
         return Witch(
@@ -92,6 +93,7 @@ def _build_player(
             history_store=store,
             channels=[board],
             on_potion=_noop,
+            bus=bus,
         )
     if role == "seer":
         return Seer(
@@ -100,6 +102,7 @@ def _build_player(
             history_store=store,
             identities=identities,
             channels=[board],
+            bus=bus,
         )
     if role == "villager":
         return Villager(
@@ -107,6 +110,7 @@ def _build_player(
             model_name=model,
             history_store=store,
             channels=[board],
+            bus=bus,
         )
     raise ValueError(f"未知 role: {role!r}")
 
@@ -193,7 +197,10 @@ async def build_runtime(game_id: int) -> GameRuntime:
     # 3. identities (给 Seer)
     identities = {p.player_id: ("wolf" if p.role == "wolf" else "good") for p in player_infos}
 
-    # 4. 创建 Player 实例
+    # 4. EventBus (按 game_id 隔离)
+    bus = get_bus(_bus_key(game_id))
+
+    # 5. 创建 Player 实例
     wolf_ids = [p.player_id for p in player_infos if p.role == "wolf"]
     players: dict[str, Player] = {}
     for pm in players_meta:
@@ -206,19 +213,18 @@ async def build_runtime(game_id: int) -> GameRuntime:
             identities=identities,
             board=board,
             wolf_chat=wolf_chat,
+            bus=bus,
         )
 
-    # 5. God + GodContext
+    # 6. God + GodContext
     god_ctx = GodContext(state=state, board=board, wolf_chat=wolf_chat, players=players)
     god = God(
         player_id="god",
         model_name=game.god_model,
         history_store=InMemoryHistoryStore(),
         ctx=god_ctx,
+        bus=bus,
     )
-
-    # 6. EventBus (按 game_id 隔离)
-    bus = get_bus(_bus_key(game_id))
 
     # 7. 装 runtime + 挂 sinks
     runtime = GameRuntime(
@@ -230,7 +236,6 @@ async def build_runtime(game_id: int) -> GameRuntime:
         god=god,
         bus=bus,
     )
-    # 给两个 channel 都挂 sqlite + bus 两个 sink
     runtime_ref = [runtime]
     for ch in (board, wolf_chat):
         ch.add_sink(_make_sqlite_sink(game_id, runtime_ref))

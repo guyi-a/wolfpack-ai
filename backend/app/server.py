@@ -12,12 +12,16 @@
 """
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
+from sqlalchemy import select
 
+from app.infra.db import AsyncSessionLocal
 from app.infra.settings import settings
+from app.models.game import Game
 from app.routers import game, health, meta, stream
 
 
@@ -25,6 +29,21 @@ from app.routers import game, health, meta, stream
 async def lifespan(app: FastAPI):
     """启动时做基础初始化, 关闭时清理. schema migration 走 alembic, 不在这里 create_all."""
     settings.ensure_dirs()
+
+    # 兜底: 上次进程死掉留下的 status='running' 是僵尸局, 全部标 aborted.
+    # 真正的"断点续跑"是大工程 (见 CLAUDE.md "故障恢复"), MVP 先用这个清理.
+    async with AsyncSessionLocal() as db:
+        stale = await db.execute(select(Game).where(Game.status == "running"))
+        sweeped = 0
+        for g in stale.scalars().all():
+            g.status = "aborted"
+            g.error_message = "server_restart"
+            g.ended_at = datetime.now(timezone.utc)
+            sweeped += 1
+        if sweeped:
+            await db.commit()
+            logger.warning(f"启动 sweep: {sweeped} 个僵尸 game 已标 aborted")
+
     logger.info(f"Wolfpack 启动 — db={settings.db_path}, port={settings.port}")
     yield
     logger.info("Wolfpack 关闭")

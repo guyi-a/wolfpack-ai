@@ -11,7 +11,7 @@ from typing import Optional, Sequence
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.game import Game, GameEvent, GamePlayer
+from app.models.game import Game, GameEvent, GamePlayer, PlayerPrivateHistory
 from app.schemas.game import GameConfig
 
 
@@ -191,3 +191,80 @@ async def list_events(
         stmt = stmt.where(GameEvent.channel.in_(channels))
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+# ============================================================================
+# PlayerPrivateHistory — 私有 LLM messages 归档
+# ============================================================================
+
+
+async def archive_private_histories(
+    db: AsyncSession,
+    game_id: int,
+    histories: dict[str, list],
+) -> int:
+    """对局结束时, 把所有 player (含 god) 的私有 history dump 到 SQLite.
+
+    Args:
+        game_id: 对局 ID
+        histories: {player_id: list[HistoryEntry]} (HistoryEntry 见 app/agent/contexts/history.py)
+
+    Returns:
+        归档的行数.
+    """
+    rows: list[PlayerPrivateHistory] = []
+    for player_id, entries in histories.items():
+        for seq, entry in enumerate(entries):
+            rows.append(
+                PlayerPrivateHistory(
+                    game_id=game_id,
+                    player_id=player_id,
+                    seq=seq,
+                    role=entry.role,
+                    text=entry.text,
+                    thinking=entry.thinking,
+                    tool_calls=entry.tool_calls,
+                    tool_call_id=entry.tool_call_id,
+                    name=entry.name,
+                    round=entry.round,
+                )
+            )
+    if rows:
+        db.add_all(rows)
+        await db.commit()
+    return len(rows)
+
+
+async def list_private_history(
+    db: AsyncSession,
+    game_id: int,
+    player_id: str,
+) -> Sequence[PlayerPrivateHistory]:
+    """读出某 player 的归档 history. 按 seq 升序."""
+    stmt = (
+        select(PlayerPrivateHistory)
+        .where(
+            PlayerPrivateHistory.game_id == game_id,
+            PlayerPrivateHistory.player_id == player_id,
+        )
+        .order_by(PlayerPrivateHistory.seq)
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+async def list_all_private_histories(
+    db: AsyncSession,
+    game_id: int,
+) -> dict[str, list[PlayerPrivateHistory]]:
+    """读出该局所有 player 的归档. 返回 {player_id: [...]}."""
+    stmt = (
+        select(PlayerPrivateHistory)
+        .where(PlayerPrivateHistory.game_id == game_id)
+        .order_by(PlayerPrivateHistory.player_id, PlayerPrivateHistory.seq)
+    )
+    result = await db.execute(stmt)
+    out: dict[str, list[PlayerPrivateHistory]] = {}
+    for row in result.scalars().all():
+        out.setdefault(row.player_id, []).append(row)
+    return out

@@ -14,6 +14,7 @@ God 通过 run_phase 工具按 prompt 调度顺序跑完所有 phase.
 """
 
 import sys
+import asyncio
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent
@@ -65,7 +66,7 @@ def build_players(board, wolf_chat, identities) -> dict:
     }
 
 
-def main():
+async def main():
     state, board, wolf_chat, identities = setup()
     players = build_players(board, wolf_chat, identities)
 
@@ -82,7 +83,7 @@ def main():
     print(f"配置: {[(p.player_id, p.role) for p in state.players]}")
     print("=" * 76)
 
-    result = play_game(god, state, max_rounds=8)
+    result = await play_game(god, state, max_rounds=8)
 
     print("\n" + "=" * 76)
     print(f"对局结束: winner={result['winner']}, rounds={result['rounds_played']}, "
@@ -116,4 +117,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

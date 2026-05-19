@@ -125,7 +125,7 @@ class WolfNightPhase:
         self.alive_ids = list(alive_ids)
         self.rounds = rounds
 
-    def run(self) -> PhaseResult:
+    async def run(self) -> PhaseResult:
         if not self.wolves:
             return PhaseResult(
                 name="wolf_night",
@@ -140,7 +140,7 @@ class WolfNightPhase:
         for round_idx in range(1, self.rounds + 1):
             for wolf in self.wolves:
                 task = self._build_task(round_idx, wolf, collector)
-                speech = wolf.act(task, round=self.game_round)
+                speech = await wolf.act(task, round=self.game_round)
                 self.wolf_chat.append_speech(self.game_round, wolf.player_id, speech)
 
         tie_breaker = [w.player_id for w in self.wolves]
@@ -226,7 +226,7 @@ class SeerNightPhase:
         self.game_round = game_round
         self.alive_ids = list(alive_ids)
 
-    def run(self) -> PhaseResult:
+    async def run(self) -> PhaseResult:
         result_box: dict[str, str] = {}
 
         def on_check(target_id: str, result: str) -> None:
@@ -247,7 +247,7 @@ class SeerNightPhase:
             f"可查验候选 (活着的非己): {', '.join(f'{p}号' for p in candidates)}. "
             f"请选择一名玩家用 check_player(target_id) 查验. target_id 必须从候选里选."
         )
-        self.seer.act(task, round=self.game_round)
+        await self.seer.act(task, round=self.game_round)
 
         return PhaseResult(
             name="seer_night",
@@ -290,7 +290,7 @@ class WitchNightPhase:
         self.kill_target = kill_target
         self.alive_ids = list(alive_ids)
 
-    def run(self) -> PhaseResult:
+    async def run(self) -> PhaseResult:
         actions: dict[str, Optional[str]] = {"save": None, "poison": None}
 
         def on_potion(potion_type: str, target_id: Optional[str]) -> None:
@@ -318,7 +318,7 @@ class WitchNightPhase:
             f"请决定: 用解药救人 (use_potion('save'))、用毒药毒人 (use_potion('poison', target_id))、"
             f"或者啥也不做 (不调工具). 注意: 如果两瓶药都没有, 直接不调."
         )
-        self.witch.act(task, round=self.game_round)
+        await self.witch.act(task, round=self.game_round)
 
         # 保存动作 (后续 phase 把它 apply 到 GameState.night_actions)
         save_done = actions["save"] is not None
@@ -349,7 +349,7 @@ class NightAnnouncePhase:
         self.state = state
         self.board = board
 
-    def run(self) -> PhaseResult:
+    async def run(self) -> PhaseResult:
         deaths = self.state.settle_night()
         self.board.append_night_result(self.state.round, deaths)
         return PhaseResult(
@@ -389,7 +389,7 @@ class LastWordsPhase:
         self.reason = reason
         self.word_limit = word_limit
 
-    def run(self) -> PhaseResult:
+    async def run(self) -> PhaseResult:
         reason_zh = {
             "killed_at_night": "昨晚被狼刀",
             "voted_out": "刚被投票放逐",
@@ -401,7 +401,7 @@ class LastWordsPhase:
             "如果你是村民可以表达对场上的看法; 如果你是狼可以选择继续装好人混淆视听. "
             "请发表遗言."
         )
-        text = self.dying.act(task, round=self.game_round)
+        text = await self.dying.act(task, round=self.game_round)
         self.board.append_last_words(self.game_round, self.dying.player_id, text, self.reason)
         return PhaseResult(
             name="last_words",
@@ -436,7 +436,7 @@ class DaySpeechPhase:
         self.game_round = game_round
         self.word_limit = word_limit
 
-    def run(self) -> PhaseResult:
+    async def run(self) -> PhaseResult:
         speeches: list[tuple[str, str]] = []
         n = len(self.speakers)
         for i, speaker in enumerate(self.speakers, start=1):
@@ -446,7 +446,7 @@ class DaySpeechPhase:
                 f"发言顺序是 {i}/{n}. "
                 f"请综合昨晚公告和已有发言, 用一段话 ({self.word_limit} 字以内) 表态."
             )
-            text = speaker.act(task, round=self.game_round)
+            text = await speaker.act(task, round=self.game_round)
             self.board.append_speech(self.game_round, speaker.player_id, text)
             speeches.append((speaker.player_id, text))
         return PhaseResult(
@@ -488,14 +488,19 @@ class DayVotePhase:
         self.game_round = game_round
         self.alive_ids = list(alive_ids)
 
-    def run(self) -> PhaseResult:
+    async def run(self) -> PhaseResult:
         collector = VoteCollector()
         self._rebind_vote_callbacks(collector)
 
+        # 第一步: 所有 voter 顺序调 cast_vote, 但不把投票写 board
+        # (避免后置 voter 通过 board / messages 看到前面的票引发跟票)
         for voter in self.voters:
-            task = self._build_task(voter, collector)
-            voter.act(task, round=self.game_round)
-            # 投票事件: 取这位 voter 最新的投票写 board
+            task = self._build_task(voter)
+            await voter.act(task, round=self.game_round)
+
+        # 第二步: 全部投完后, 按 voter 顺序 append 投票事件到 board
+        # 此时是同时亮票, 顺序只是写入顺序, 玩家在投票时是看不到的
+        for voter in self.voters:
             target = collector.raw_votes().get(voter.player_id)
             if target is not None:
                 self.board.append_vote(self.game_round, voter.player_id, target)
@@ -503,7 +508,6 @@ class DayVotePhase:
         tally = collector.tally()
         all_ids = [v.player_id for v in self.voters]
         abstentions = collector.abstentions(all_ids)
-        # 白天投票: 平票 -> 平安天 (loser=None), 不用 tie_breaker
         loser = collector.winner(tie_breaker=None)
         self.board.append_vote_result(self.game_round, loser, tally, abstentions)
 
@@ -542,13 +546,11 @@ class DayVotePhase:
             voter.tools = new_tools
             voter.set_model(voter.model_name)  # 重编译 agent
 
-    def _build_task(self, voter: Player, collector: VoteCollector) -> str:
+    def _build_task(self, voter: Player) -> str:
         candidates = ", ".join(f"{pid}号" for pid in self.alive_ids if pid != voter.player_id)
-        current = collector.tally()
-        tally_str = f"当前票数分布: {current}. " if current else ""
         return (
             f"现在是第 {self.game_round} 天投票阶段. 你是 {voter.player_id} 号. "
-            f"{tally_str}"
+            f"投票是同时进行的, 你看不到别人投了谁, 也不能跟票. "
             f"候选 (活着的非己): {candidates}. "
             f"请基于已知信息, 用 cast_vote(target_id) 投一票. "
             f"target_id 必须是纯数字字符串 (例如 '5', 不要带'号'字), 必须从候选里选. "

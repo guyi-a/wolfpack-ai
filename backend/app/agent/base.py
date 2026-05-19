@@ -6,23 +6,27 @@
   - system_prompt    : 角色 prompt (注入 build_agent, 不入 history)
   - tools            : 可选工具列表
   - history_store    : 私有 history (assistant 的 thinking / tool 结果, 仅自己可见)
-  - channels         : 加入的频道列表 (board / wolf_chat / lovers 等). 通过 is_visible_to
-                       自动隔离, 不需要 player 自己写权限检查
+  - channels         : 加入的频道列表 (board / wolf_chat / lovers 等)
+  - bus              : 可选 EventBus, 传入则 act 时推流式事件 (player_state / token_chunk / inner_view)
   - 内部按 model_name 解析 adapter + 编译 agent (build_agent)
 
-act(task) 一次轮回:
-  1. 读私有 history → adapter.to_messages
-  2. 遍历所有可见 channels 渲染成 HumanMessage 列表
-  3. 末尾追加 HumanMessage(task)
-  4. agent.invoke → 拿一轮新 messages
-  5. 把新 AI / Tool 全部 normalize, 写回 private store
-  6. 返回最终 text
+act(task) 一次轮回 (async, 走 astream_events):
+  1. 读私有 history → adapter.to_messages + 拼 channel 事件 → messages
+  2. publish player_state(thinking)
+  3. async for event in agent.astream_events:
+       on_chat_model_stream → publish token_chunk (thinking / text)
+       on_tool_start        → publish player_state(tool_calling, tool_name)
+       on_tool_end          → (no-op, 工具结果作为 ToolMessage 写 history)
+  4. publish player_state(idle)
+  5. 把新 AI / Tool 全部 normalize 写回 store
+  6. publish inner_view (一次性汇总本轮 thinking + tool_calls + text)
+  7. 返回最终 text
 
-注意: 公开发言 / 狼频道发言由调用方 (supervisor) 在 act() 之后 append 到 channel,
+注意: 公开发言由调用方 (phase / supervisor) 在 act() 之后 append 到 channel,
        Player 不主动写 channel — 它不知道当前 round/phase.
 """
 
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -32,6 +36,7 @@ from app.agent.contexts.history import HistoryEntry
 from app.agent.contexts.history_store import HistoryStore
 from app.agent.infra.agent_factory import build_agent
 from app.core.channel import Channel, ChannelEvent
+from app.infra.event_bus import EventBus
 
 
 # 频道名 → 渲染前缀模板. 每条事件再叠上 kind 决定具体内容.
@@ -84,6 +89,30 @@ def _render_event(channel: Channel, event: ChannelEvent) -> Optional[str]:
     return None
 
 
+def _extract_chunk_text(chunk: Any) -> tuple[str, str]:
+    """从 LangChain AIMessageChunk 抽出 (thinking_delta, text_delta).
+
+    deepseek/glm/mimo: content 是 list[{type:thinking}, {type:text}]
+    claude-opus: content 是 string (直接当 text)
+    """
+    if chunk is None:
+        return "", ""
+    content = chunk.content if hasattr(chunk, "content") else None
+    if isinstance(content, str):
+        return "", content
+    if isinstance(content, list):
+        thinking, text = "", ""
+        for b in content:
+            if isinstance(b, dict):
+                t = b.get("type")
+                if t == "thinking":
+                    thinking += b.get("thinking", "")
+                elif t == "text":
+                    text += b.get("text", "")
+        return thinking, text
+    return "", ""
+
+
 class Player:
     """单 Agent 玩家. 外层 supervisor 只通过 act(task) 跟它交互."""
 
@@ -96,6 +125,7 @@ class Player:
         tools: Sequence[BaseTool] | None = None,
         *,
         channels: Optional[Sequence[Channel]] = None,
+        bus: Optional[EventBus] = None,
         include_thinking_in_context: bool = False,
         **llm_kwargs,
     ) -> None:
@@ -104,23 +134,72 @@ class Player:
         self.history_store = history_store
         self.channels: list[Channel] = list(channels) if channels else []
         self.tools = list(tools) if tools else []
+        self.bus = bus
         self.include_thinking_in_context = include_thinking_in_context
         self._llm_kwargs = llm_kwargs
         self.set_model(model_name)
 
     # ------------------------------------------------------------------ public
 
-    def act(self, task: str, *, round: int = 0) -> str:
+    async def act(self, task: str, *, round: int = 0) -> str:
+        """异步执行一次 act.
+
+        流式推送 (bus 非空时):
+          - player_state(thinking) at model_start
+          - token_chunk(thinking/text) at model_stream
+          - player_state(tool_calling, tool_name) at tool_start
+          - player_state(idle) at model_end (最后一次)
+          - inner_view 一次性汇总 (含 thinking + tool_calls + text)
+        """
         messages = self._build_messages(task)
         baseline = len(messages) - 1
-        result = self.agent.invoke({"messages": messages})
-        new_msgs = result["messages"][baseline:]
 
+        self._publish_state("thinking")
+
+        try:
+            final_messages = None
+            async for event in self.agent.astream_events(
+                {"messages": messages},
+                version="v2",
+                config={"recursion_limit": 200},
+            ):
+                kind = event.get("event", "")
+
+                if kind == "on_chat_model_start":
+                    self._publish_state("thinking")
+                elif kind == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    thinking_delta, text_delta = _extract_chunk_text(chunk)
+                    if thinking_delta:
+                        self._publish_token("thinking", thinking_delta)
+                    if text_delta:
+                        self._publish_token("text", text_delta)
+                elif kind == "on_tool_start":
+                    self._publish_state(
+                        "tool_calling",
+                        tool_name=event.get("name", ""),
+                    )
+                elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+                    # 整个 graph 跑完, 拿最终 messages
+                    output = event.get("data", {}).get("output")
+                    if isinstance(output, dict) and "messages" in output:
+                        final_messages = output["messages"]
+        finally:
+            self._publish_state("idle")
+
+        # 兜底: 极端情况 final_messages 没拿到, 退化到非流式 invoke
+        if final_messages is None:
+            result = self.agent.invoke({"messages": messages})
+            final_messages = result["messages"]
+
+        new_msgs = final_messages[baseline:]
+
+        # 写回 history
         self.history_store.append(
             self.player_id, HistoryEntry(role="user", text=task, round=round)
         )
-
         last_text = ""
+        new_entries: list[HistoryEntry] = []
         for m in new_msgs:
             if isinstance(m, HumanMessage):
                 continue
@@ -128,20 +207,23 @@ class Player:
                 entry = self.adapter.normalize(m)
                 entry.round = round
                 self.history_store.append(self.player_id, entry)
+                new_entries.append(entry)
                 if entry.text:
                     last_text = entry.text
             elif isinstance(m, ToolMessage):
                 content = m.content if isinstance(m.content, str) else str(m.content)
-                self.history_store.append(
-                    self.player_id,
-                    HistoryEntry(
-                        role="tool",
-                        text=content,
-                        tool_call_id=getattr(m, "tool_call_id", "") or "",
-                        name=getattr(m, "name", "") or "",
-                        round=round,
-                    ),
+                entry = HistoryEntry(
+                    role="tool",
+                    text=content,
+                    tool_call_id=getattr(m, "tool_call_id", "") or "",
+                    name=getattr(m, "name", "") or "",
+                    round=round,
                 )
+                self.history_store.append(self.player_id, entry)
+                new_entries.append(entry)
+
+        # 一次性汇总 inner_view (给前端复盘 / 上帝视角)
+        self._publish_inner_view(round, new_entries)
         return last_text
 
     def set_model(self, model_name: str) -> None:
@@ -165,32 +247,88 @@ class Player:
         """私有 history (仅自己的发言 / thinking / 工具结果)."""
         return self.history_store.load(self.player_id)
 
+    # ------------------------------------------------------------------ bus 推送
+
+    def _publish_state(self, state: str, *, tool_name: str = "") -> None:
+        if self.bus is None:
+            return
+        payload: dict = {"player_id": self.player_id, "state": state}
+        if tool_name:
+            payload["tool_name"] = tool_name
+        self.bus.publish({"kind": "player_state", "payload": payload})
+
+    def _publish_token(self, phase: str, delta: str) -> None:
+        if self.bus is None:
+            return
+        self.bus.publish({
+            "kind": "token_chunk",
+            "payload": {
+                "player_id": self.player_id,
+                "phase": phase,   # "thinking" / "text"
+                "delta": delta,
+            },
+        })
+
+    def _publish_inner_view(self, round: int, new_entries: list[HistoryEntry]) -> None:
+        if self.bus is None or not new_entries:
+            return
+        # 汇总本轮 act 内产生的 assistant + tool 条目
+        thinking_parts: list[str] = []
+        text_parts: list[str] = []
+        tool_records: list[dict] = []
+        last_tool_call_args: dict[str, dict] = {}
+        for e in new_entries:
+            if e.role == "assistant":
+                if e.thinking:
+                    thinking_parts.append(e.thinking)
+                if e.text:
+                    text_parts.append(e.text)
+                for tc in e.tool_calls or []:
+                    tc_id = tc.get("id") or ""
+                    record = {
+                        "id": tc_id,
+                        "name": tc.get("name"),
+                        "args": tc.get("args"),
+                        "result": None,
+                    }
+                    tool_records.append(record)
+                    if tc_id:
+                        last_tool_call_args[tc_id] = record
+            elif e.role == "tool":
+                rec = last_tool_call_args.get(e.tool_call_id)
+                if rec is not None:
+                    rec["result"] = e.text
+        self.bus.publish({
+            "kind": "inner_view",
+            "payload": {
+                "player_id": self.player_id,
+                "round": round,
+                "thinking": "\n".join(thinking_parts),
+                "tool_calls": tool_records,
+                "text": "\n".join(text_parts),
+            },
+        })
+
     # ------------------------------------------------------------------ helpers
 
     def _build_messages(self, task: str) -> list:
         """从所有可见 channel + 私有 history 拼出本次 invoke 的 messages.
 
         排序策略:
-          - 主键: round 升序 (round=0 视为最早, 比所有具体轮次都早)
-          - 同 round 内: 先 channels (按 self.channels list 顺序), 再私有 history
-          - 私有 history / channel 内部各自按 append 顺序保持稳定
+          - 主键: round 升序 (round=0 视为最早)
+          - 同 round 内: 先 channels, 再私有 history
         最后追加本轮 task (HumanMessage), task 自身不入排序.
         """
         entries = self.history_store.load(self.player_id)
-        # 私有 history → 一次性转成 messages, 跟 entries 一一对应保留 round
         private_msgs = self.adapter.to_messages(
             entries,
             include_thinking=self.include_thinking_in_context,
         )
-        # to_messages 输出 len 跟 entries 不一定一致 (会跳过 None);
-        # 我们直接按 entries 长度迭代, 用 entries[i].round 作为 key
-        private_with_round: list[tuple[int, int, object]] = []  # (round, seq, message)
-        # 简单兜底: 若 to_messages 输出条数等于 entries, 一一对应; 否则按顺序对齐前 N 条
+        private_with_round: list[tuple[int, int, object]] = []
         n = min(len(entries), len(private_msgs))
         for i in range(n):
             private_with_round.append((entries[i].round, i, private_msgs[i]))
 
-        # channels → 同样组织成 (round, seq, message), seq 由 (channel_idx, event_idx) 组合
         channel_msgs: list[tuple[int, int, object]] = []
         for ch_idx, channel in enumerate(self.channels):
             if not channel.is_visible_to(self.player_id):
@@ -198,12 +336,9 @@ class Player:
             for ev_idx, event in enumerate(channel.events):
                 text = _render_event(channel, event)
                 if text:
-                    # 用 (channel_idx, event_idx) 编码成稳定 seq, channel 之间靠 ch_idx 决定优先级
                     seq = ch_idx * 100000 + ev_idx
                     channel_msgs.append((event.round, seq, HumanMessage(text)))
 
-        # channels 在前, private 在后 (同 round 内): 给 channel_msgs 的 seq 让一档
-        # 做法: 私有 seq + 大偏移
         OFFSET = 10_000_000
         merged: list[tuple[int, int, object]] = list(channel_msgs) + [
             (r, s + OFFSET, m) for (r, s, m) in private_with_round

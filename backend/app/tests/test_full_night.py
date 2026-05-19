@@ -15,6 +15,7 @@
 """
 
 import sys
+import asyncio
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent
@@ -58,7 +59,7 @@ def noop(*a, **k):
     pass
 
 
-def main():
+async def main():
     state, board, wolf_chat, identities = setup()
     state.start_round()
     print(f"=== 第 {state.round} 夜 ===")
@@ -106,7 +107,7 @@ def main():
         alive_ids=state.alive_ids(),
         rounds=2,
     )
-    wp_result = wp.run()
+    wp_result = await wp.run()
     print(f"  狼频道发言:")
     for e in wolf_chat.all_events():
         print(f"    {e.payload['speaker']}号: {e.payload['text'][:80]}")
@@ -116,7 +117,7 @@ def main():
     # ---------- Phase 2: 预言家 ----------
     print("\n--- SeerNightPhase ---")
     sp = SeerNightPhase(seer=seer, game_round=state.round, alive_ids=state.alive_ids())
-    sp_result = sp.run()
+    sp_result = await sp.run()
     print(f"  → 查 {sp_result.payload['target']} 号 → {sp_result.payload['result']}")
 
     # ---------- Phase 3: 女巫 ----------
@@ -127,7 +128,7 @@ def main():
         kill_target=state.night_actions.wolf_kill_target,
         alive_ids=state.alive_ids(),
     )
-    wtp_result = wtp.run()
+    wtp_result = await wtp.run()
     print(f"  → save={wtp_result.payload['save']}, poison_target={wtp_result.payload['poison_target']}")
     state.night_actions.witch_save = wtp_result.payload["save"]
     state.night_actions.witch_poison_target = wtp_result.payload["poison_target"]
@@ -135,7 +136,7 @@ def main():
     # ---------- Phase 4: 公告 ----------
     print("\n--- NightAnnouncePhase ---")
     nap = NightAnnouncePhase(state=state, board=board)
-    nap_result = nap.run()
+    nap_result = await nap.run()
     print(f"  → 死亡公告: {nap_result.payload['deaths']}")
     print(f"  → 当前活人: {state.alive_ids()}, phase={state.phase.value}")
 
@@ -163,4 +164,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -18,6 +18,7 @@
 """
 
 import sys
+import asyncio
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent
@@ -74,7 +75,7 @@ def build_players(board: Channel, wolf_chat: Channel, identities: dict) -> dict:
     }
 
 
-def main():
+async def main():
     state, board, wolf_chat, identities = setup()
     players = build_players(board, wolf_chat, identities)
 
@@ -90,14 +91,14 @@ def main():
 
     # ---- Phase 1: NightAnnounce ----
     print("\n--- NightAnnouncePhase ---")
-    nap = NightAnnouncePhase(state=state, board=board).run()
+    nap = await NightAnnouncePhase(state=state, board=board).run()
     print(f"  → 死亡: {nap.payload['deaths']}")
     deaths = nap.payload["deaths"]
 
     # ---- Phase 2: LastWords (夜间死者) ----
     for dead_pid in deaths:
         print(f"\n--- LastWordsPhase ({dead_pid}号 killed_at_night) ---")
-        lw = LastWordsPhase(
+        lw = await LastWordsPhase(
             dying=players[dead_pid],
             board=board,
             game_round=state.round,
@@ -109,14 +110,14 @@ def main():
     print("\n--- DaySpeechPhase ---")
     alive = state.alive_ids()
     speakers = [players[pid] for pid in alive]
-    sp = DaySpeechPhase(speakers=speakers, board=board, game_round=state.round).run()
+    sp = await DaySpeechPhase(speakers=speakers, board=board, game_round=state.round).run()
     for pid, text in sp.payload["speeches"]:
         print(f"  [{pid}号] {text}")
 
     # ---- Phase 4: DayVote ----
     print("\n--- DayVotePhase ---")
     voters = [players[pid] for pid in alive]
-    vp = DayVotePhase(
+    vp = await DayVotePhase(
         voters=voters,
         board=board,
         game_round=state.round,
@@ -133,7 +134,7 @@ def main():
     if vp.payload["loser"]:
         loser = vp.payload["loser"]
         print(f"\n--- LastWordsPhase ({loser}号 voted_out) ---")
-        lw2 = LastWordsPhase(
+        lw2 = await LastWordsPhase(
             dying=players[loser],
             board=board,
             game_round=state.round,
@@ -155,4 +156,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
