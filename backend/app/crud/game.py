@@ -235,6 +235,42 @@ async def archive_private_histories(
     return len(rows)
 
 
+async def append_private_history(
+    db: AsyncSession,
+    game_id: int,
+    player_id: str,
+    entries: list,
+    start_seq: int,
+) -> int:
+    """单个 player 增量追加 history (act 结束后调用).
+
+    Args:
+        start_seq: 此次追加的第一条 seq (调用方维护 per-player 计数)
+    Returns:
+        追加的行数.
+    """
+    if not entries:
+        return 0
+    rows = [
+        PlayerPrivateHistory(
+            game_id=game_id,
+            player_id=player_id,
+            seq=start_seq + i,
+            role=e.role,
+            text=e.text,
+            thinking=e.thinking,
+            tool_calls=e.tool_calls,
+            tool_call_id=e.tool_call_id,
+            name=e.name,
+            round=e.round,
+        )
+        for i, e in enumerate(entries)
+    ]
+    db.add_all(rows)
+    await db.commit()
+    return len(rows)
+
+
 async def list_private_history(
     db: AsyncSession,
     game_id: int,

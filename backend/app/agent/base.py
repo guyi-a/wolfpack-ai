@@ -26,7 +26,7 @@ act(task) 一次轮回 (async, 走 astream_events):
        Player 不主动写 channel — 它不知道当前 round/phase.
 """
 
-from typing import Any, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -37,6 +37,11 @@ from app.agent.contexts.history_store import HistoryStore
 from app.agent.infra.agent_factory import build_agent
 from app.core.channel import Channel, ChannelEvent
 from app.infra.event_bus import EventBus
+
+
+# 每次 act 结束后的钩子: (player_id, 本次新增的 entries) -> awaitable
+# 由外层 (e.g. GameRuntime) 用来增量落库 player_private_history
+ActFinishedHook = Callable[[str, list[HistoryEntry]], Awaitable[None]]
 
 
 # 频道名 → 渲染前缀模板. 每条事件再叠上 kind 决定具体内容.
@@ -126,6 +131,7 @@ class Player:
         *,
         channels: Optional[Sequence[Channel]] = None,
         bus: Optional[EventBus] = None,
+        on_act_finished: Optional[ActFinishedHook] = None,
         include_thinking_in_context: bool = False,
         **llm_kwargs,
     ) -> None:
@@ -135,6 +141,7 @@ class Player:
         self.channels: list[Channel] = list(channels) if channels else []
         self.tools = list(tools) if tools else []
         self.bus = bus
+        self.on_act_finished = on_act_finished
         self.include_thinking_in_context = include_thinking_in_context
         self._llm_kwargs = llm_kwargs
         self.set_model(model_name)
@@ -195,9 +202,8 @@ class Player:
         new_msgs = final_messages[baseline:]
 
         # 写回 history
-        self.history_store.append(
-            self.player_id, HistoryEntry(role="user", text=task, round=round)
-        )
+        user_entry = HistoryEntry(role="user", text=task, round=round)
+        self.history_store.append(self.player_id, user_entry)
         last_text = ""
         new_entries: list[HistoryEntry] = []
         for m in new_msgs:
@@ -224,6 +230,15 @@ class Player:
 
         # 一次性汇总 inner_view (给前端复盘 / 上帝视角)
         self._publish_inner_view(round, new_entries)
+
+        # 增量落库 hook: 本次 act 的所有 entries (含 user task 这条)
+        if self.on_act_finished is not None:
+            try:
+                await self.on_act_finished(self.player_id, [user_entry] + new_entries)
+            except Exception:
+                # 落库失败不影响游戏继续, 由 sink 自己 log
+                pass
+
         return last_text
 
     def set_model(self, model_name: str) -> None:

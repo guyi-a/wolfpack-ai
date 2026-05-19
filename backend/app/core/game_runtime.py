@@ -14,16 +14,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Optional, Sequence
 
+from app.agent.base import ActFinishedHook, Player
+from app.agent.contexts.history import HistoryEntry
 from app.agent.contexts.history_store import InMemoryHistoryStore
 from app.agent.roles.god import God, GodContext
 from app.agent.roles.seer import Seer
 from app.agent.roles.villager import Villager
 from app.agent.roles.witch import Witch
 from app.agent.roles.wolf import Wolf
-from app.agent.base import Player
 from app.core.channel import Channel, ChannelEvent
 from app.core.game_state import GameState, PlayerInfo
 from app.crud import game as crud
@@ -74,6 +76,7 @@ def _build_player(
     board: Channel,
     wolf_chat: Channel,
     bus: Optional[EventBus] = None,
+    on_act_finished: Optional[ActFinishedHook] = None,
 ) -> Player:
     store = InMemoryHistoryStore()
     if role == "wolf":
@@ -85,6 +88,7 @@ def _build_player(
             channels=[wolf_chat, board],
             on_vote=_noop,
             bus=bus,
+            on_act_finished=on_act_finished,
         )
     if role == "witch":
         return Witch(
@@ -94,6 +98,7 @@ def _build_player(
             channels=[board],
             on_potion=_noop,
             bus=bus,
+            on_act_finished=on_act_finished,
         )
     if role == "seer":
         return Seer(
@@ -103,6 +108,7 @@ def _build_player(
             identities=identities,
             channels=[board],
             bus=bus,
+            on_act_finished=on_act_finished,
         )
     if role == "villager":
         return Villager(
@@ -111,6 +117,7 @@ def _build_player(
             history_store=store,
             channels=[board],
             bus=bus,
+            on_act_finished=on_act_finished,
         )
     raise ValueError(f"未知 role: {role!r}")
 
@@ -176,6 +183,29 @@ def _make_bus_sink(bus: EventBus, runtime_ref: list["GameRuntime"]):
     return sink
 
 
+def _make_history_sink(game_id: int) -> ActFinishedHook:
+    """增量落库 sink: 每次 player.act() 结束后追加 entries 到 player_private_history.
+
+    维护 per-player 的 seq counter, 保证写入顺序 = act 顺序.
+    """
+    seq_counters: dict[str, int] = defaultdict(int)
+    lock = asyncio.Lock()
+
+    async def sink(player_id: str, entries: list[HistoryEntry]) -> None:
+        if not entries:
+            return
+        async with lock:
+            start = seq_counters[player_id]
+            seq_counters[player_id] = start + len(entries)
+        try:
+            async with AsyncSessionLocal() as db:
+                await crud.append_private_history(db, game_id, player_id, entries, start)
+        except Exception:
+            logger.exception("history sink failed (game=%s player=%s)", game_id, player_id)
+
+    return sink
+
+
 async def build_runtime(game_id: int) -> GameRuntime:
     """从 SQLite 拉配置, 构造完整 runtime 并挂好 sinks."""
     async with AsyncSessionLocal() as db:
@@ -200,6 +230,9 @@ async def build_runtime(game_id: int) -> GameRuntime:
     # 4. EventBus (按 game_id 隔离)
     bus = get_bus(_bus_key(game_id))
 
+    # 4.5 history sink (act 结束增量落库)
+    history_sink = _make_history_sink(game_id)
+
     # 5. 创建 Player 实例
     wolf_ids = [p.player_id for p in player_infos if p.role == "wolf"]
     players: dict[str, Player] = {}
@@ -214,6 +247,7 @@ async def build_runtime(game_id: int) -> GameRuntime:
             board=board,
             wolf_chat=wolf_chat,
             bus=bus,
+            on_act_finished=history_sink,
         )
 
     # 6. God + GodContext
@@ -224,6 +258,7 @@ async def build_runtime(game_id: int) -> GameRuntime:
         history_store=InMemoryHistoryStore(),
         ctx=god_ctx,
         bus=bus,
+        on_act_finished=history_sink,
     )
 
     # 7. 装 runtime + 挂 sinks

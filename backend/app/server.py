@@ -13,9 +13,11 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from sqlalchemy import select
 
@@ -70,3 +72,8 @@ app.include_router(health.router, tags=["system"])
 app.include_router(meta.router)
 app.include_router(game.router)
 app.include_router(stream.router)
+
+# 静态 demo (开发期视觉调性预览, 不参与 production 路径)
+_DEMO_DIR = Path(__file__).resolve().parent.parent.parent / "examples" / "frontend-demo"
+if _DEMO_DIR.exists():
+    app.mount("/demo", StaticFiles(directory=str(_DEMO_DIR), html=True), name="demo")

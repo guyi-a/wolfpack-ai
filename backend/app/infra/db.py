@@ -36,7 +36,7 @@ settings.ensure_dirs()
 # Async engine (单例, 进程级别)
 engine = create_async_engine(
     settings.database_url,
-    echo=settings.debug,
+    echo=settings.debug_sql,
     connect_args={"check_same_thread": False},  # SQLite 必加
     future=True,
 )

@@ -34,6 +34,10 @@ class Settings(BaseSettings):
 
     # ---- 运行模式 ----
     debug: bool = False
+    # 是否打印 SQL (echo). debug=True 也默认关掉, 避免 SWR 轮询刷屏
+    debug_sql: bool = False
+    # 是否打印每条 HTTP 请求 (uvicorn access log)
+    access_log: bool = False
 
     # ---- HTTP 服务 ----
     host: str = "127.0.0.1"   # 桌面 app 只听 loopback, 防止外部访问

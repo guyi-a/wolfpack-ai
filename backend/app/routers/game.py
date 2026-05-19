@@ -117,11 +117,7 @@ async def _run_game_async(game_id: int, runtime, max_rounds: int) -> None:
                             round_num=p.died_at_round or 0,
                             cause=p.death_cause or "unknown",
                         )
-                # 2. 归档每个 player + god 的私有 history
-                histories = _collect_histories(runtime)
-                rows = await crud.archive_private_histories(db, game_id, histories)
-                logger.info(f"[game {game_id}] 归档 private history {rows} 行")
-                # 3. mark_ended
+                # 2. mark_ended (私有 history 已在每次 act 结束时增量落库)
                 await crud.mark_ended(
                     db, game,
                     winner=result["winner"],
@@ -133,25 +129,10 @@ async def _run_game_async(game_id: int, runtime, max_rounds: int) -> None:
         async with AsyncSessionLocal() as db:
             game = await crud.get_game(db, game_id)
             if game is not None:
-                # 异常退出也归档已有的 history (复盘异常局)
-                try:
-                    histories = _collect_histories(runtime)
-                    await crud.archive_private_histories(db, game_id, histories)
-                except Exception:
-                    logger.exception(f"[game {game_id}] 归档失败 (异常退出路径)")
                 await crud.mark_aborted(db, game, error=str(e))
     finally:
         runtime.bus.publish(None)
         drop_bus(f"game:{game_id}")
-
-
-def _collect_histories(runtime) -> dict:
-    """从 runtime 收集 player + god 的私有 history. 输出 {player_id: list[HistoryEntry]}."""
-    out: dict[str, list] = {}
-    for pid, player in runtime.players.items():
-        out[pid] = player.history()
-    out["god"] = runtime.god.history()
-    return out
 
 
 @router.get(
