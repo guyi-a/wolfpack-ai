@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+/* ────────────────────────────────────────────────────────────────
+   Wolfpack 设计 tokens — 博弈室 × 实验室仪表盘
+   ──────────────────────────────────────────────────────────────── */
+@theme {
+  /* 色板 */
+  --color-bg:        #0E0E10;
+  --color-bg-soft:   #15151A;
+  --color-bg-card:   #1C1C22;
+  --color-bg-deep:   #08080A;
+  --color-bg-active: #1E1A14;
+
+  --color-line:      #2A2A33;
+  --color-line-soft: #1F1F26;
+
+  --color-ivory:     #EAE6DA;
+  --color-smoke:     #7B7770;
+  --color-smoke-dim: #4A4843;
+
+  --color-blood:     #B0252E;
+  --color-blood-dim: #6B1A20;
+  --color-candle:    #D9A24C;
+  --color-moon:      #5C7F8F;
+
+  /* 字体 */
+  --font-serif: "Fraunces", "Source Han Serif SC", Georgia, serif;
+  --font-mono:  "JetBrains Mono", "SF Mono", Menlo, monospace;
+  --font-sans:  var(--font-mono);
+}
+
+/* ────────────── 全局 reset + 基础 ────────────── */
+* { box-sizing: border-box; }
+html, body, #root {
+  margin: 0; padding: 0;
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-ivory);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 全局噪点叠层 (氛围感) */
+body::before {
+  content: "";
+  position: fixed; inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: .04;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200' viewBox='0 0 200 200'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.9' numOctaves='3' seed='5'/%3E%3CfeColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ────────────── 滚动条 ────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-line); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-smoke-dim); }
+
+/* ────────────── 数字字体 ────────────── */
+.tabular { font-variant-numeric: tabular-nums; }
