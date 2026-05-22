@@ -1,4 +1,12 @@
-/** 后端 API 调用封装. vite 已把 /api 代理到 :8080 */
+/** 后端 API 调用封装.
+ *
+ * dev (vite): API_BASE = "/api", Vite proxy 把前缀 rewrite 掉转发到 :8080
+ * prod (electron 加载本地 HTML): 没 proxy, 走 preload 注入的
+ *   window.__WOLFPACK__.apiBase (端口由 Electron Main 动态找, 8081 起递增).
+ *   兜底用 http://127.0.0.1:8080 (preload 没注入时 — 实际不该发生).
+ *
+ * 暴露 apiUrl() 给非 fetch 场景用 (EventSource SSE).
+ */
 
 import type {
   ChannelEvent,
@@ -7,7 +15,17 @@ import type {
   PrivateHistoryOut,
 } from "@/lib/types";
 
-const API = "/api";
+function resolveApiBase(): string {
+  if (!import.meta.env.PROD) return "/api";
+  const injected =
+    typeof window !== "undefined" ? window.__WOLFPACK__?.apiBase : undefined;
+  return injected || "http://127.0.0.1:8080";
+}
+
+const API = resolveApiBase();
+
+/** 拼后端 URL. path 以 / 开头, 如 "/games/1/stream". */
+export const apiUrl = (path: string): string => API + path;
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, init);
@@ -70,6 +88,14 @@ export const startGame = (
     method: "POST",
   });
 
+export const deleteGame = async (id: number | string): Promise<void> => {
+  const res = await fetch(`${API}/games/${id}`, { method: "DELETE" });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+};
+
 // ============================================================================
 // Histories (复盘)
 // ============================================================================
@@ -84,3 +110,62 @@ export const getAllHistories = (
   gameId: number | string,
 ): Promise<PrivateHistoryOut[]> =>
   request(`${API}/games/${gameId}/histories`);
+
+// ============================================================================
+// Stats (Home 用)
+// ============================================================================
+
+export interface StatsByRole {
+  role: "wolf" | "seer" | "witch" | "villager";
+  total: number;
+  wins: number;
+}
+
+export interface StatsByModel {
+  model: string;
+  total: number;
+  wins: number;
+}
+
+export interface StatsByModelRole {
+  model: string;
+  role: StatsByRole["role"];
+  total: number;
+  wins: number;
+}
+
+export interface GameStats {
+  total_games: number;
+  ended_games: number;
+  good_wins: number;
+  wolf_wins: number;
+  aborted: number;
+  avg_rounds: number;
+  by_role: StatsByRole[];
+  by_model: StatsByModel[];
+  by_model_role: StatsByModelRole[];
+}
+
+export const getStats = (): Promise<GameStats> => request(`${API}/games/stats`);
+
+// ============================================================================
+// Settings
+// ============================================================================
+
+export interface AppSettings {
+  anthropic_api_key: string;
+  anthropic_base_url: string;
+  updated_at: string | null;
+}
+
+export const getSettings = (): Promise<AppSettings> =>
+  request(`${API}/settings`);
+
+export const updateSettings = (
+  body: Partial<Pick<AppSettings, "anthropic_api_key" | "anthropic_base_url">>,
+): Promise<AppSettings> =>
+  request(`${API}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });

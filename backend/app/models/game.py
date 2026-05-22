@@ -129,6 +129,55 @@ class GameEvent(Base):
     game: Mapped["Game"] = relationship(back_populates="events")
 
 
+class RuntimeSnapshot(Base):
+    """一局对局的运行时快照. 每局至多 1 行, 对局结束时删除.
+
+    用于 server 重启后接着跑: 把 GameState (round/phase/night_actions/...)
+    + 女巫的 PotionState + sqlite/history 高水位序号 一起存下.
+    """
+
+    __tablename__ = "runtime_snapshot"
+
+    game_id: Mapped[int] = mapped_column(
+        ForeignKey("game.id", ondelete="CASCADE"), primary_key=True
+    )
+    round: Mapped[int] = mapped_column(Integer, default=0)
+    phase: Mapped[str] = mapped_column(String(16))         # GameState.Phase enum value
+    night_actions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    eliminated_today: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True
+    )
+    deaths_announced_today: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # {player_id: {save_available, poison_available}} — 未来可扩 (守卫 last_target 等)
+    potion_states: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # 高水位 — restore 时按 seq 切掉脏行
+    last_event_seq: Mapped[int] = mapped_column(Integer, default=0)
+    last_history_seqs: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    last_phase_name: Mapped[str] = mapped_column(String(32), default="")
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+
+class AppSettings(Base):
+    """全局应用设置. singleton 表 (固定 id=1), 不分用户.
+
+    存 Anthropic 协议接入凭据 (Novita 中转 key + base_url), 由设置页写入,
+    server 启动时读出来注入 os.environ 给 llm_factory 用.
+    """
+
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    anthropic_api_key: Mapped[str] = mapped_column(Text, default="")
+    anthropic_base_url: Mapped[str] = mapped_column(
+        String(256), default="https://api.novita.ai/anthropic"
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
 class PlayerPrivateHistory(Base):
     """对局结束时归档的"player 私有 LLM messages 流".
 

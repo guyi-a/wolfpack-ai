@@ -58,7 +58,14 @@ export default function LobbyPage() {
       toast.success(`Game #${game.id} 已启动`);
       navigate(`/games/${game.id}`);
     } catch (e) {
-      toast.error(`开局失败: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      // 后端缺 key 时回 400 + 含 "ANTHROPIC_API_KEY"; 提示并跳设置页
+      if (msg.includes("ANTHROPIC_API_KEY") || msg.includes("API_KEY")) {
+        toast.error("尚未配置 API key, 即将前往设置页");
+        setTimeout(() => navigate("/settings"), 800);
+      } else {
+        toast.error(`开局失败: ${msg}`);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -74,12 +81,12 @@ export default function LobbyPage() {
   const valid = counts.wolf >= 1 && counts.seer >= 1;
 
   return (
-    <div className="min-h-screen px-10 py-8">
-      <header className="flex items-baseline gap-6 pb-6 border-b border-line">
+    <div className="min-h-screen px-10 pt-3 pb-8">
+      <header className="drag-region flex items-center gap-6 pb-5 border-b border-line pl-20">
         <Link to="/" className="font-mono text-[12px] text-smoke hover:text-ivory tracking-[0.05em]">
           ← 返回
         </Link>
-        <h1 className="font-serif text-2xl font-semibold tracking-[0.06em] text-ivory">
+        <h1 className="font-serif text-2xl font-semibold tracking-[0.06em] text-ivory leading-none">
           NEW GAME <span className="text-smoke font-normal text-base ml-2">· 6 人板</span>
         </h1>
         <span className="flex-1" />
@@ -90,7 +97,7 @@ export default function LobbyPage() {
         )}
         <button
           onClick={loadDefault}
-          className="px-3 py-1.5 border border-line text-smoke font-mono text-[10px] tracking-[0.2em] uppercase
+          className="h-9 inline-flex items-center px-3 border border-line text-smoke font-mono text-[10px] tracking-[0.2em] uppercase
                      hover:text-ivory hover:border-smoke transition-colors"
         >
           载入默认

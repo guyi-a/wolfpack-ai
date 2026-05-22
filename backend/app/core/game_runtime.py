@@ -8,13 +8,16 @@
   - bus_sink: 推到这局专属的 EventBus (供 SSE 订阅)
 
 这样 phase 跑业务时只 channel.append, 持久化 + 实时广播自动发生.
+
+另外: GameRuntime 持有 `snapshot(last_phase)` 用于断点续跑. God 每跑完一个
+phase 调一次. snapshot 前会 flush 所有 in-flight 的 sqlite 写, 保证落库严格
+≤ snapshot 的 last_event_seq.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -24,10 +27,10 @@ from app.agent.contexts.history_store import InMemoryHistoryStore
 from app.agent.roles.god import God, GodContext
 from app.agent.roles.seer import Seer
 from app.agent.roles.villager import Villager
-from app.agent.roles.witch import Witch
+from app.agent.roles.witch import PotionState, Witch
 from app.agent.roles.wolf import Wolf
 from app.core.channel import Channel, ChannelEvent
-from app.core.game_state import GameState, PlayerInfo
+from app.core.game_state import GameState, NightActions, Phase, PlayerInfo
 from app.crud import game as crud
 from app.infra.db import AsyncSessionLocal
 from app.infra.event_bus import EventBus, get_bus
@@ -51,10 +54,78 @@ class GameRuntime:
     god: God
     bus: EventBus
     _seq_counter: list[int] = field(default_factory=lambda: [0])
+    # in-flight sqlite_sink 写任务, snapshot 前要 await 干净
+    _pending_writes: list[asyncio.Task] = field(default_factory=list)
+    # per-player history seq 高水位 (= 已落库的行数). 跟 history_sink 共享这同一份 dict.
+    _history_seq_counters: dict[str, int] = field(default_factory=dict)
 
     def next_seq(self) -> int:
         self._seq_counter[0] += 1
         return self._seq_counter[0]
+
+    async def flush_writes(self) -> None:
+        """等待所有 in-flight sqlite_sink 写任务完成. snapshot 前必调."""
+        if not self._pending_writes:
+            return
+        pending = [t for t in self._pending_writes if not t.done()]
+        self._pending_writes.clear()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def snapshot(self, *, last_phase: str) -> None:
+        """Phase 完成后写一次 runtime_snapshot.
+
+        步骤: flush 写队列 → 同步死亡到 game_player → 收集 potion_states → upsert.
+
+        死亡同步到 game_player 是 restore 时恢复 alive 状态的唯一可靠来源 (snapshot
+        本身不存 alive). kill_player 幂等, 重复 snapshot 不会出错.
+        """
+        await self.flush_writes()
+
+        try:
+            async with AsyncSessionLocal() as db:
+                for p in self.state.players:
+                    if not p.alive:
+                        await crud.kill_player(
+                            db,
+                            self.game_id,
+                            p.player_id,
+                            round_num=p.died_at_round or 0,
+                            cause=p.death_cause or "unknown",
+                        )
+        except Exception:
+            logger.exception("snapshot: sync deaths failed (game=%s)", self.game_id)
+
+        potion_states: dict[str, dict] = {}
+        for pid, player in self.players.items():
+            if isinstance(player, Witch):
+                ps = player.potion_state
+                potion_states[pid] = {
+                    "save_available": ps.save_available,
+                    "poison_available": ps.poison_available,
+                }
+        night_actions = {
+            "wolf_kill_target": self.state.night_actions.wolf_kill_target,
+            "witch_save": self.state.night_actions.witch_save,
+            "witch_poison_target": self.state.night_actions.witch_poison_target,
+        }
+        try:
+            async with AsyncSessionLocal() as db:
+                await crud.upsert_snapshot(
+                    db,
+                    self.game_id,
+                    round=self.state.round,
+                    phase=self.state.phase.value,
+                    night_actions=night_actions,
+                    eliminated_today=self.state.eliminated_today,
+                    deaths_announced_today=list(self.state.deaths_announced_today),
+                    potion_states=potion_states,
+                    last_event_seq=self._seq_counter[0],
+                    last_history_seqs=dict(self._history_seq_counters),
+                    last_phase_name=last_phase,
+                )
+        except Exception:
+            logger.exception("snapshot failed (game=%s phase=%s)", self.game_id, last_phase)
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +198,8 @@ def _make_sqlite_sink(game_id: int, runtime_ref: list["GameRuntime"]):
 
     Channel.append 是同步触发, 用 asyncio.create_task fire-and-forget 异步写入.
     seq 在同步入口计算好传进 task, 保证落库顺序 = 调用顺序.
+
+    task 会追加到 runtime._pending_writes, snapshot 前 flush 用.
     """
 
     def sink(channel: Channel, event: ChannelEvent) -> None:
@@ -154,7 +227,8 @@ def _make_sqlite_sink(game_id: int, runtime_ref: list["GameRuntime"]):
 
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_write())
+            task = loop.create_task(_write())
+            runtime._pending_writes.append(task)
         except RuntimeError:
             # 没在 event loop 里跑 (e.g. asyncio.to_thread 的子线程) — 退化成新 loop
             asyncio.run(_write())
@@ -183,19 +257,21 @@ def _make_bus_sink(bus: EventBus, runtime_ref: list["GameRuntime"]):
     return sink
 
 
-def _make_history_sink(game_id: int) -> ActFinishedHook:
+def _make_history_sink(
+    game_id: int, seq_counters: dict[str, int]
+) -> ActFinishedHook:
     """增量落库 sink: 每次 player.act() 结束后追加 entries 到 player_private_history.
 
-    维护 per-player 的 seq counter, 保证写入顺序 = act 顺序.
+    seq_counters 是外部传入的共享 dict (放在 runtime._history_seq_counters 上),
+    snapshot 时直接读. 保证写入顺序 = act 顺序.
     """
-    seq_counters: dict[str, int] = defaultdict(int)
     lock = asyncio.Lock()
 
     async def sink(player_id: str, entries: list[HistoryEntry]) -> None:
         if not entries:
             return
         async with lock:
-            start = seq_counters[player_id]
+            start = seq_counters.get(player_id, 0)
             seq_counters[player_id] = start + len(entries)
         try:
             async with AsyncSessionLocal() as db:
@@ -230,8 +306,9 @@ async def build_runtime(game_id: int) -> GameRuntime:
     # 4. EventBus (按 game_id 隔离)
     bus = get_bus(_bus_key(game_id))
 
-    # 4.5 history sink (act 结束增量落库)
-    history_sink = _make_history_sink(game_id)
+    # 4.5 history sink (act 结束增量落库) — counter dict 之后塞给 runtime 共享
+    history_seq_counters: dict[str, int] = {}
+    history_sink = _make_history_sink(game_id, history_seq_counters)
 
     # 5. 创建 Player 实例
     wolf_ids = [p.player_id for p in player_infos if p.role == "wolf"]
@@ -250,8 +327,10 @@ async def build_runtime(game_id: int) -> GameRuntime:
             on_act_finished=history_sink,
         )
 
-    # 6. God + GodContext
-    god_ctx = GodContext(state=state, board=board, wolf_chat=wolf_chat, players=players)
+    # 6. God + GodContext (on_phase_done 占位, 等 runtime 建好再注入)
+    god_ctx = GodContext(
+        state=state, board=board, wolf_chat=wolf_chat, players=players
+    )
     god = God(
         player_id="god",
         model_name=game.god_model,
@@ -270,14 +349,133 @@ async def build_runtime(game_id: int) -> GameRuntime:
         players=players,
         god=god,
         bus=bus,
+        _history_seq_counters=history_seq_counters,
     )
     runtime_ref = [runtime]
     for ch in (board, wolf_chat):
         ch.add_sink(_make_sqlite_sink(game_id, runtime_ref))
         ch.add_sink(_make_bus_sink(bus, runtime_ref))
 
+    # 8. 注入 phase 完成钩子 (循环引用问题: ctx 持有 runtime.snapshot, runtime 持有 god, god 持有 ctx)
+    async def _on_phase_done(phase_name: str) -> None:
+        await runtime.snapshot(last_phase=phase_name)
+
+    god_ctx.on_phase_done = _on_phase_done
+
     return runtime
 
 
 def _bus_key(game_id: int) -> str:
     return f"game:{game_id}"
+
+
+# ---------------------------------------------------------------------------
+# 断点续跑: 从 SQLite 重建运行时
+# ---------------------------------------------------------------------------
+
+
+async def restore_runtime(game_id: int) -> GameRuntime:
+    """从 SQLite 重建一个已跑到一半的 game 的运行时.
+
+    前提: runtime_snapshot 表里有 game_id 对应的快照行.
+    流程: build_runtime → 按 snapshot 高水位清理脏行 → 重放事件/history → 恢复
+    GameState/PotionState/seq counters → 返回 runtime, 调用方再交给 play_game.
+    """
+    # 1. 拿 snapshot (没有就报错, 调用方自己处理)
+    async with AsyncSessionLocal() as db:
+        snap = await crud.load_snapshot(db, game_id)
+    if snap is None:
+        raise ValueError(f"game {game_id} 没有 runtime_snapshot, 无法 restore")
+
+    # 2. 建一份全新 runtime (空 channel events / 空 history / state.round=0)
+    runtime = await build_runtime(game_id)
+
+    # 3. 清理脏数据 — 把高水位之后的行删了 (snapshot 之后到 server 崩之前的部分写)
+    #    history 要遍历所有可能的 player_id (含 god): snapshot 里没记录的 pid
+    #    意味着 snapshot 时 count=0, 它在 snapshot 之后写的 history 全是脏的, 也要清.
+    all_player_ids = list(runtime.players.keys()) + ["god"]
+    async with AsyncSessionLocal() as db:
+        await crud.delete_events_after_seq(db, game_id, snap.last_event_seq)
+        for pid in all_player_ids:
+            count = int(snap.last_history_seqs.get(pid, 0) or 0)
+            await crud.delete_history_after_seq(db, game_id, pid, count)
+
+    # 4. 重放 game_event 到 channel.events (临时摘掉 sinks, 不要触发二次落库 / 二次 publish)
+    async with AsyncSessionLocal() as db:
+        events = await crud.list_events(db, game_id)
+    channels_by_name = {runtime.board.name: runtime.board, runtime.wolf_chat.name: runtime.wolf_chat}
+    for ch in channels_by_name.values():
+        saved_sinks = ch.sinks
+        ch.sinks = []
+        try:
+            for ev in events:
+                if ev.channel != ch.name:
+                    continue
+                ch.append(ChannelEvent(kind=ev.kind, round=ev.round, payload=dict(ev.payload)))
+        finally:
+            ch.sinks = saved_sinks
+
+    # 5. 重放 player_private_history 到 InMemoryHistoryStore
+    async with AsyncSessionLocal() as db:
+        histories = await crud.list_all_private_histories(db, game_id)
+    for pid, rows in histories.items():
+        player = runtime.players.get(pid) if pid != "god" else runtime.god
+        if player is None:
+            logger.warning("restore: 未知 player_id=%s, 跳过 history 重放", pid)
+            continue
+        for r in rows:
+            entry = HistoryEntry(
+                role=r.role,
+                text=r.text,
+                thinking=r.thinking,
+                tool_calls=list(r.tool_calls or []),
+                tool_call_id=r.tool_call_id or "",
+                name=r.name or "",
+                round=r.round,
+            )
+            player.history_store.append(pid, entry)
+
+    # 6. 从 snapshot 重建 GameState 的可变部分
+    state = runtime.state
+    state.round = snap.round
+    state.phase = Phase(snap.phase)
+    na = snap.night_actions or {}
+    state.night_actions = NightActions(
+        wolf_kill_target=na.get("wolf_kill_target"),
+        witch_save=bool(na.get("witch_save", False)),
+        witch_poison_target=na.get("witch_poison_target"),
+    )
+    state.eliminated_today = snap.eliminated_today
+    state.deaths_announced_today = list(snap.deaths_announced_today or [])
+
+    # 7. 从 game_player 表恢复死亡 (源头是这张表, 跑中 phase 没同步, 但 mark_ended 同步过.
+    #    更可靠的还是从 channel events / state.kill 推, 但快照只覆盖快照时点的状态.
+    #    保险: 用 game_player 行, 如果 alive=False 则在 state 里也 kill.)
+    async with AsyncSessionLocal() as db:
+        players_meta = await crud.get_players(db, game_id)
+    for pm in players_meta:
+        if not pm.alive:
+            pi = state.get(pm.player_id)
+            pi.alive = False
+            pi.died_at_round = pm.died_at_round
+            pi.death_cause = pm.death_cause
+
+    # 8. 恢复女巫 PotionState
+    for pid, ps_dict in (snap.potion_states or {}).items():
+        player = runtime.players.get(pid)
+        if isinstance(player, Witch):
+            player.potion_state = PotionState(
+                save_available=bool(ps_dict.get("save_available", True)),
+                poison_available=bool(ps_dict.get("poison_available", True)),
+            )
+
+    # 9. 恢复 seq counters
+    runtime._seq_counter[0] = snap.last_event_seq
+    for pid, count in (snap.last_history_seqs or {}).items():
+        runtime._history_seq_counters[pid] = int(count)
+
+    logger.info(
+        "restored game=%s round=%s phase=%s last_phase=%s events=%s",
+        game_id, state.round, state.phase.value, snap.last_phase_name, snap.last_event_seq,
+    )
+    return runtime

@@ -28,8 +28,11 @@ interface GameStore {
   active: string | null;                   // 最近 thinking/tool_calling 的 player_id
   ended: boolean;
   endReason: string | null;
+  /** 复盘游标: null = 看全部 (最新); n = 只看到 round n 末. 仅复盘模式生效 */
+  replayCursor: number | null;
   apply: (e: SseEvent) => void;
   loadReplay: (histories: PrivateHistoryOut[]) => void;
+  setReplayCursor: (round: number | null) => void;
   reset: () => void;
 }
 
@@ -42,6 +45,7 @@ const INITIAL = {
   active: null as string | null,
   ended: false,
   endReason: null as string | null,
+  replayCursor: null as number | null,
 };
 
 export const useGameStore = create<GameStore>((set) => ({
@@ -117,6 +121,8 @@ export const useGameStore = create<GameStore>((set) => ({
     }),
 
   reset: () => set({ ...INITIAL }),
+
+  setReplayCursor: (round: number | null) => set({ replayCursor: round }),
 
   loadReplay: (histories: PrivateHistoryOut[]) =>
     set(() => {

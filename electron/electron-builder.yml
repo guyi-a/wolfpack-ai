@@ -1,0 +1,47 @@
+# electron-builder 配置.
+#
+# 跑法 (从 electron/ 目录):
+#   pnpm package
+#
+# 产物在 electron/release/ 下, mac 出 .dmg + .zip.
+#
+# 关键设计:
+#  - files: 只塞 main 进程编译产物 (out/) + 渲染端 (frontend-dist/) + package.json
+#  - extraResources: backend binary 塞到 app.app/Contents/Resources/
+#    main.ts 用 process.resourcesPath 找它
+#  - asar: true (默认), js 走 asar 加速启动; binary 不进 asar (上一行已经放到 extraResources)
+
+appId: com.wolfpack.desktop
+productName: Wolfpack
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build-resources    # icon.icns / DMG 背景图等
+
+files:
+  - "out/**/*"
+  - "frontend-dist/**/*"
+  - "package.json"
+  - "!node_modules/**/*"             # node_modules 默认会被 electron-builder 处理, 这里显式排除调试碎
+
+extraResources:
+  - from: "../backend/build-dist/wolfpack-server"
+    to: "wolfpack-server"
+
+mac:
+  category: public.app-category.entertainment
+  target:
+    - target: dmg
+      arch:
+        - arm64                      # 当前机是 arm64 的, 先只打这个; intel 之后加 x64
+  icon: build-resources/icon.icns
+  hardenedRuntime: false             # 后面要分发再开 + 公证
+  gatekeeperAssess: false
+  identity: null                     # 不签名 (dev 自测够用; 分发要 Apple Developer ID)
+
+dmg:
+  title: "${productName} ${version}"
+  window:
+    width: 540
+    height: 380

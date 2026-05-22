@@ -61,3 +61,17 @@ body::before {
 
 /* ────────────── 数字字体 ────────────── */
 .tabular { font-variant-numeric: tabular-nums; }
+
+/* ────────────── Electron 桌面壳: 拖窗口区域 ──────────────
+   hiddenInset 模式没原生标题栏, 必须显式标记可拖区域.
+   浏览器忽略这两条 CSS 属性, 仅 Electron 生效. */
+.drag-region {
+  -webkit-app-region: drag;
+}
+.drag-region a,
+.drag-region button,
+.drag-region input,
+.drag-region select,
+.drag-region [role="button"] {
+  -webkit-app-region: no-drag;
+}

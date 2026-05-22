@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { StickToBottom } from "use-stick-to-bottom";
 
 import { cn } from "@/lib/cn";
 import { DotPulse } from "@/components/atoms/DotPulse";
@@ -75,14 +76,12 @@ export function InnerViewPanel({
           <button
             onClick={onTogglePin}
             className={cn(
-              "font-mono text-[9px] tracking-[0.15em] uppercase",
-              "px-2 py-1 border bg-transparent cursor-pointer ml-2",
-              pinned
-                ? "text-candle border-candle"
-                : "text-smoke border-line hover:text-ivory",
+              "font-mono text-[9px] tracking-[0.15em] uppercase whitespace-nowrap shrink-0",
+              "px-2 py-1 border bg-transparent cursor-pointer ml-2 transition-colors",
+              "text-candle border-candle hover:bg-candle/10",
             )}
           >
-            {pinned ? "📌 PINNED" : "FOLLOW"}
+            {pinned ? "📌 PINNED" : "FOLLOWING"}
           </button>
         </div>
 
@@ -122,24 +121,33 @@ export function InnerViewPanel({
         )}
       </div>
 
-      {/* body */}
-      <div className="flex-1 overflow-y-auto px-7 py-5">
-        {roundViews.length === 0 ? (
-          <p className="font-mono text-[11px] text-smoke-dim py-12 text-center tracking-[0.05em]">
-            (尚未发声)
-          </p>
-        ) : (
-          roundViews.map((v, i) => (
-            <ActBlock
-              key={i}
-              view={v}
-              actIndex={i + 1}
-              total={roundViews.length}
-              isLive={liveView !== null && v === liveView}
-            />
-          ))
-        )}
-      </div>
+      {/* body — 自动 stick 到底, 用户手动往上滚后停止跟随, 滚回底恢复 */}
+      {/* body — 自动 stick 到底, 用户手动往上滚后停止跟随, 滚回底恢复.
+          key 用 player.player_id, 切 player 时强制 remount → initial 重新触发 → 落到底 */}
+      <StickToBottom
+        key={player.player_id}
+        className="flex-1 min-h-0"
+        resize="smooth"
+        initial="smooth"
+      >
+        <StickToBottom.Content className="px-7 py-5">
+          {roundViews.length === 0 ? (
+            <p className="font-mono text-[11px] text-smoke-dim py-12 text-center tracking-[0.05em]">
+              (尚未发声)
+            </p>
+          ) : (
+            roundViews.map((v, i) => (
+              <ActBlock
+                key={i}
+                view={v}
+                actIndex={i + 1}
+                total={roundViews.length}
+                isLive={liveView !== null && v === liveView}
+              />
+            ))
+          )}
+        </StickToBottom.Content>
+      </StickToBottom>
     </div>
   );
 }

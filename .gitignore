@@ -41,6 +41,9 @@ data/
 logs/
 backend/wolfpack-data/
 
+# Nuitka 打包产物 (54MB binary, 不入仓)
+backend/build-dist/
+
 # 日志 / trace
 .langsmith/
 .trace/

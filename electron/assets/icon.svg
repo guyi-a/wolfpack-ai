@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1a22"/>
+      <stop offset="1" stop-color="#08080a"/>
+    </linearGradient>
+  </defs>
+  <!-- 本体 824x824, 居中在 1024 画布上, 四周 100px 透明边距 (macOS HIG) -->
+  <rect x="100" y="100" width="824" height="824" rx="184" ry="184" fill="url(#bg)"/>
+  <text x="512" y="615"
+        font-family="Georgia, serif"
+        font-weight="900"
+        font-size="500"
+        text-anchor="middle"
+        fill="#EAE6DA"
+        letter-spacing="-24">W</text>
+  <circle cx="728" cy="728" r="48" fill="#B0252E"/>
+</svg>

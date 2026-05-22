@@ -10,7 +10,7 @@ God 持有 GodContext (含 GameState + channels + 全员 player 实例), 工具�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from langchain_core.tools import tool
 
@@ -83,6 +83,8 @@ class GodContext:
     players: dict[str, Player]   # player_id -> Player 实例
     # 记录最近一次 phase 结果, 主要给后续 phase 引用
     last_phase_result: dict = None
+    # phase 完成钩子, GameRuntime 注入用于写 runtime_snapshot
+    on_phase_done: Optional[Callable[[str], Awaitable[None]]] = None
 
 
 def _build_god_tools(ctx: GodContext):
@@ -103,6 +105,14 @@ def _build_god_tools(ctx: GodContext):
     @tool
     async def run_phase(name: str) -> dict:
         """跑一个阶段. name ∈ {wolf_night, seer_night, witch_night, night_announce, day_speech, day_vote, last_words_voted}."""
+        result = await _run_phase_inner(name)
+        # phase 完成 → 写一次 runtime_snapshot (用于断点续跑).
+        # error / skipped 不写, 因为状态没推进.
+        if ctx.on_phase_done is not None and "error" not in result:
+            await ctx.on_phase_done(name)
+        return result
+
+    async def _run_phase_inner(name: str) -> dict:
         s = ctx.state
         if name == "wolf_night":
             # 若进入新一轮, start_round (从 ENDED 不会到这, is_over 会被 check_winner 截掉)

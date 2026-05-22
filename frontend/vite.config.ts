@@ -4,6 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 export default defineConfig({
+  // 相对 base, prod 下 Electron 用 file:// 加载本地 index.html, 资源路径才能解析
+  base: "./",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

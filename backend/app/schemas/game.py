@@ -128,3 +128,48 @@ class PrivateHistoryOut(BaseModel):
 
     player_id: str
     entries: list[PrivateHistoryEntryOut]
+
+
+# ============================================================================
+# 统计 (GET /games/stats)
+# ============================================================================
+
+
+class StatsByModelRole(BaseModel):
+    """某模型在某角色的胜负统计."""
+
+    model: str
+    role: Role
+    total: int       # 该 (model, role) 出场总局数
+    wins: int        # 这些局中其阵营获胜的次数
+
+
+class StatsByRole(BaseModel):
+    """某角色 (不区分模型) 的全局胜率."""
+
+    role: Role
+    total: int
+    wins: int
+
+
+class StatsByModel(BaseModel):
+    """某模型 (不区分角色) 的全局胜率."""
+
+    model: str
+    total: int
+    wins: int
+
+
+class GameStatsOut(BaseModel):
+    """对局聚合统计 (Home 用)."""
+
+    total_games: int          # 总局数 (含 pending/running)
+    ended_games: int          # 已结束的局数 (含 ended + aborted)
+    good_wins: int
+    wolf_wins: int
+    aborted: int
+    avg_rounds: float         # 已结束局的平均轮数
+
+    by_role: list[StatsByRole]
+    by_model: list[StatsByModel]
+    by_model_role: list[StatsByModelRole]

@@ -5,6 +5,8 @@ interface PhaseStepperProps {
   currentPhase: string;
   pinnedPlayerId?: string | null;
   followMode: boolean;
+  /** PINNED 时点击 → 切回 AUTO; followMode 时禁用 */
+  onResetFollow?: () => void;
 }
 
 const PHASE_LABEL: Record<string, string> = {
@@ -16,7 +18,7 @@ const PHASE_LABEL: Record<string, string> = {
   day_vote: "vote",
 };
 
-export function PhaseStepper({ currentPhase, pinnedPlayerId, followMode }: PhaseStepperProps) {
+export function PhaseStepper({ currentPhase, pinnedPlayerId, followMode, onResetFollow }: PhaseStepperProps) {
   const idx = PHASE_ORDER.findIndex((p) => p === currentPhase);
 
   return (
@@ -49,14 +51,22 @@ export function PhaseStepper({ currentPhase, pinnedPlayerId, followMode }: Phase
           );
         })}
       </div>
-      <div
-        className={cn(
-          "font-mono text-[10px] tracking-[0.25em] uppercase",
-          followMode ? "text-smoke-dim" : "text-candle",
-        )}
-      >
-        {followMode ? "↻ AUTO FOLLOW" : `📌 PINNED · ${pinnedPlayerId}号`}
-      </div>
+      {followMode ? (
+        <div className="font-mono text-[10px] tracking-[0.25em] uppercase text-smoke-dim">
+          ↻ AUTO FOLLOW
+        </div>
+      ) : (
+        <button
+          onClick={onResetFollow}
+          title="点击恢复自动跟随活跃 player"
+          className="group font-mono text-[10px] tracking-[0.25em] uppercase text-candle
+                     px-2.5 py-1 border border-candle/40 hover:border-candle hover:bg-candle/10
+                     transition-colors cursor-pointer"
+        >
+          <span className="group-hover:hidden">📌 PINNED · {pinnedPlayerId}号</span>
+          <span className="hidden group-hover:inline">↻ 恢复 AUTO</span>
+        </button>
+      )}
     </div>
   );
 }

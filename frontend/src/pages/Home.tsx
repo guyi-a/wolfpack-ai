@@ -1,48 +1,73 @@
+import { useState } from "react";
 import { Link } from "react-router";
-import useSWR from "swr";
+import useSWR, { useSWRConfig } from "swr";
+import { Settings, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
-import { listGames } from "@/lib/api";
+import { deleteGame, listGames, getStats, type GameStats } from "@/lib/api";
 import { MOCK_GAMES_LIST } from "@/lib/mock";
 import { cn } from "@/lib/cn";
 import type { GameSummary } from "@/lib/types";
 
+const ROLE_CN: Record<GameStats["by_role"][number]["role"], string> = {
+  wolf: "狼人",
+  seer: "预言家",
+  witch: "女巫",
+  villager: "村民",
+};
+
+const ROLE_TONE: Record<GameStats["by_role"][number]["role"], string> = {
+  wolf: "text-blood",
+  seer: "text-candle",
+  witch: "text-moon",
+  villager: "text-ivory",
+};
+
 export default function HomePage() {
+  const { mutate } = useSWRConfig();
   const { data, error, isLoading } = useSWR<GameSummary[]>("games-list", () => listGames(50), {
+    refreshInterval: 5000,
+  });
+  const { data: stats } = useSWR<GameStats>("games-stats", getStats, {
     refreshInterval: 5000,
   });
 
   // 后端没起或没数据时, fallback 到 mock (开发期保留视觉)
   const games = data ?? (error ? MOCK_GAMES_LIST : []);
 
-  // 简单聚合
-  const ended = games.filter((g) => g.status === "ended");
-  const goodWins = ended.filter((g) => g.winner === "good").length;
-  const wolfWins = ended.filter((g) => g.winner === "wolf").length;
-  const goodPct = ended.length ? Math.round((goodWins / ended.length) * 100) : 0;
-  const wolfPct = ended.length ? 100 - goodPct : 0;
+  const handleDelete = async (id: number) => {
+    try {
+      await deleteGame(id);
+      toast.success(`#${id} 已删除`);
+      await Promise.all([mutate("games-list"), mutate("games-stats")]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`删除失败: ${msg}`);
+    }
+  };
 
-  // 模型出场实时统计 (从 god_model 聚合, 后面接 GET /games/{id} players 再细化)
-  const modelMap = games.reduce<Record<string, number>>((acc, g) => {
-    const name = g.god_model.split("/").pop() ?? g.god_model;
-    acc[name] = (acc[name] ?? 0) + 1;
-    return acc;
-  }, {});
-  const modelCounts = Object.entries(modelMap)
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count);
-  const maxModel = Math.max(...modelCounts.map((m) => m.count), 1);
+  // 胜率: 后端 stats 优先, 没有时用客户端聚合 (fallback)
+  const ended = games.filter((g) => g.status === "ended");
+  const goodWins = stats?.good_wins ?? ended.filter((g) => g.winner === "good").length;
+  const wolfWins = stats?.wolf_wins ?? ended.filter((g) => g.winner === "wolf").length;
+  const endedCount = stats?.ended_games ?? ended.length;
+  const goodPct = endedCount ? Math.round((goodWins / endedCount) * 100) : 0;
+  const wolfPct = endedCount ? 100 - goodPct : 0;
+  const avgRounds =
+    stats?.avg_rounds ??
+    (games.length ? games.reduce((s, g) => s + g.rounds_played, 0) / games.length : 0);
 
   return (
-    <div className="min-h-screen px-10 py-8">
-      <header className="flex items-baseline gap-6 pb-6 border-b border-line">
-        <div>
-          <h1 className="font-serif text-3xl font-extrabold tracking-[0.06em]">
+    <div className="min-h-screen px-10 pt-3 pb-8">
+      <header className="drag-region flex items-center gap-6 pb-5 border-b border-line pl-20">
+        <h1 className="font-serif text-2xl font-extrabold tracking-[0.06em] leading-none flex items-baseline gap-3">
+          <span>
             WOLFPACK<span className="text-blood">.</span>
-          </h1>
-          <p className="font-mono text-[11px] tracking-[0.2em] uppercase text-smoke mt-1">
+          </span>
+          <span className="font-mono text-[10px] tracking-[0.25em] uppercase text-smoke font-normal">
             AI 狼人杀观测台
-          </p>
-        </div>
+          </span>
+        </h1>
         <span className="flex-1" />
         {error && (
           <span className="font-mono text-[10px] text-blood-dim tracking-[0.1em]">
@@ -50,9 +75,17 @@ export default function HomePage() {
           </span>
         )}
         <Link
+          to="/settings"
+          title="设置"
+          className="h-9 w-9 inline-flex items-center justify-center border border-line text-smoke
+                     hover:text-candle hover:border-candle/60 transition-colors"
+        >
+          <Settings className="w-4 h-4" strokeWidth={1.5} />
+        </Link>
+        <Link
           to="/lobby"
-          className="px-5 py-2.5 border border-candle text-candle text-[11px] tracking-[0.25em] uppercase
-                     hover:bg-candle hover:text-bg transition-colors font-mono"
+          className="h-9 inline-flex items-center px-5 border border-candle text-candle font-mono
+                     text-[11px] tracking-[0.25em] uppercase hover:bg-candle hover:text-bg transition-colors"
         >
           新开一局 →
         </Link>
@@ -71,7 +104,7 @@ export default function HomePage() {
             <ul className="flex flex-col">
               {games.map((g) => (
                 <li key={g.id}>
-                  <GameRow game={g} />
+                  <GameRow game={g} onDelete={handleDelete} />
                 </li>
               ))}
             </ul>
@@ -88,46 +121,159 @@ export default function HomePage() {
             <div className="mt-5 grid grid-cols-2 gap-3 font-mono text-[11px]">
               <div className="bg-bg-card border border-line p-3">
                 <div className="text-smoke tracking-[0.1em] uppercase text-[9px]">total games</div>
-                <div className="text-ivory tabular text-2xl font-serif mt-1">{games.length}</div>
+                <div className="text-ivory tabular text-2xl font-serif mt-1">
+                  {stats?.total_games ?? games.length}
+                </div>
               </div>
               <div className="bg-bg-card border border-line p-3">
                 <div className="text-smoke tracking-[0.1em] uppercase text-[9px]">avg rounds</div>
                 <div className="text-ivory tabular text-2xl font-serif mt-1">
-                  {games.length
-                    ? (games.reduce((s, g) => s + g.rounds_played, 0) / games.length).toFixed(1)
-                    : "—"}
+                  {endedCount ? avgRounds.toFixed(1) : "—"}
                 </div>
               </div>
             </div>
           </div>
 
           <div>
-            <SectionTitle>GOD MODEL · 上帝模型出场</SectionTitle>
-            <div className="space-y-3">
-              {modelCounts.length === 0 ? (
-                <p className="text-smoke-dim text-xs">—</p>
-              ) : (
-                modelCounts.map((m) => (
-                  <div key={m.name} className="flex items-center gap-3">
-                    <div className="font-mono text-[11px] text-ivory w-44 truncate">{m.name}</div>
-                    <div className="flex-1 h-1.5 bg-line relative overflow-hidden">
+            <SectionTitle>BY ROLE · 角色胜率</SectionTitle>
+            {!stats || stats.by_role.length === 0 ? (
+              <p className="text-smoke-dim text-xs">—</p>
+            ) : (
+              <div className="space-y-3">
+                {stats.by_role.map((r) => {
+                  const pct = r.total ? Math.round((r.wins / r.total) * 100) : 0;
+                  return (
+                    <div key={r.role} className="flex items-center gap-3">
                       <div
-                        className="absolute inset-y-0 left-0 bg-moon"
-                        style={{ width: `${(m.count / maxModel) * 100}%` }}
-                      />
+                        className={cn(
+                          "font-mono text-[11px] w-16 truncate",
+                          ROLE_TONE[r.role],
+                        )}
+                      >
+                        {ROLE_CN[r.role]}
+                      </div>
+                      <div className="flex-1 h-1.5 bg-line relative overflow-hidden">
+                        <div
+                          className={cn(
+                            "absolute inset-y-0 left-0",
+                            r.role === "wolf" ? "bg-blood" : "bg-candle",
+                          )}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                      <div className="font-mono text-[11px] tabular text-smoke w-24 text-right">
+                        <span className="text-ivory">{pct}%</span>
+                        <span className="text-smoke-dim ml-1.5">{r.wins}/{r.total}</span>
+                      </div>
                     </div>
-                    <div className="font-mono text-[11px] tabular text-smoke w-6 text-right">
-                      {m.count}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </aside>
       </div>
+
+      {stats && stats.by_model_role.length > 0 && (
+        <section className="mt-12">
+          <SectionTitle>MODEL × ROLE · 模型在每个角色的胜率</SectionTitle>
+          <ModelRoleMatrix stats={stats} />
+        </section>
+      )}
     </div>
   );
+}
+
+interface MatrixCell {
+  total: number;
+  wins: number;
+}
+
+function ModelRoleMatrix({ stats }: { stats: GameStats }) {
+  const roles: GameStats["by_role"][number]["role"][] = ["wolf", "seer", "witch", "villager"];
+
+  // 按模型构建 row, 每行有 4 个角色的 cell + 总计
+  const byModel = new Map<string, { cells: Record<string, MatrixCell>; total: number; wins: number }>();
+  for (const row of stats.by_model_role) {
+    if (!byModel.has(row.model)) {
+      byModel.set(row.model, { cells: {}, total: 0, wins: 0 });
+    }
+    const entry = byModel.get(row.model)!;
+    entry.cells[row.role] = { total: row.total, wins: row.wins };
+    entry.total += row.total;
+    entry.wins += row.wins;
+  }
+
+  const rows = [...byModel.entries()].sort((a, b) => b[1].total - a[1].total);
+
+  return (
+    <div className="overflow-x-auto border border-line">
+      <table className="w-full font-mono text-[11px]">
+        <thead>
+          <tr className="border-b border-line bg-bg-soft">
+            <th className="text-left px-4 py-2.5 text-smoke tracking-[0.15em] uppercase text-[10px] font-normal">
+              模型
+            </th>
+            {roles.map((r) => (
+              <th
+                key={r}
+                className={cn(
+                  "text-center px-3 py-2.5 tracking-[0.15em] uppercase text-[10px] font-normal",
+                  ROLE_TONE[r],
+                )}
+              >
+                {ROLE_CN[r]}
+              </th>
+            ))}
+            <th className="text-right px-4 py-2.5 text-smoke tracking-[0.15em] uppercase text-[10px] font-normal">
+              总计
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([model, row]) => {
+            const totalPct = row.total ? Math.round((row.wins / row.total) * 100) : 0;
+            return (
+              <tr key={model} className="border-b border-line-soft hover:bg-bg-card transition-colors">
+                <td className="px-4 py-2.5 text-ivory truncate max-w-[280px]">{model}</td>
+                {roles.map((r) => {
+                  const cell = row.cells[r];
+                  if (!cell || cell.total === 0) {
+                    return (
+                      <td key={r} className="text-center px-3 py-2.5 text-smoke-dim">
+                        —
+                      </td>
+                    );
+                  }
+                  const pct = Math.round((cell.wins / cell.total) * 100);
+                  return (
+                    <td key={r} className="text-center px-3 py-2.5">
+                      <span className={cn("tabular", pctTone(pct))}>{pct}%</span>
+                      <span className="text-smoke-dim ml-1.5 tabular text-[10px]">
+                        {cell.wins}/{cell.total}
+                      </span>
+                    </td>
+                  );
+                })}
+                <td className="text-right px-4 py-2.5">
+                  <span className={cn("tabular", pctTone(totalPct))}>{totalPct}%</span>
+                  <span className="text-smoke-dim ml-1.5 tabular text-[10px]">
+                    {row.wins}/{row.total}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function pctTone(pct: number): string {
+  if (pct >= 60) return "text-candle";
+  if (pct >= 40) return "text-ivory";
+  return "text-blood-dim";
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
@@ -146,7 +292,16 @@ const STATUS_TONE: Record<GameSummary["status"], string> = {
   aborted: "text-blood-dim",
 };
 
-function GameRow({ game }: { game: GameSummary }) {
+function GameRow({
+  game,
+  onDelete,
+}: {
+  game: GameSummary;
+  onDelete: (id: number) => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
   const dur =
     game.started_at && game.ended_at
       ? formatDuration(new Date(game.ended_at).getTime() - new Date(game.started_at).getTime())
@@ -154,10 +309,26 @@ function GameRow({ game }: { game: GameSummary }) {
         ? "—"
         : "0s";
 
+  const handleClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (deleting) return;
+    if (!confirming) {
+      setConfirming(true);
+      setTimeout(() => setConfirming(false), 2500);
+      return;
+    }
+    setDeleting(true);
+    onDelete(game.id).finally(() => {
+      setDeleting(false);
+      setConfirming(false);
+    });
+  };
+
   return (
     <Link
       to={`/games/${game.id}`}
-      className="grid grid-cols-[48px_90px_90px_1fr_70px] gap-4 items-center
+      className="grid grid-cols-[48px_90px_90px_1fr_70px_auto] gap-4 items-center
                  py-3.5 border-b border-line-soft hover:bg-bg-card transition-colors group px-2 -mx-2"
     >
       <div className="font-serif text-2xl font-light text-ivory tabular">#{game.id}</div>
@@ -173,6 +344,31 @@ function GameRow({ game }: { game: GameSummary }) {
         {game.rounds_played} rounds · {game.god_model.split("/").pop()}
       </div>
       <div className="font-mono text-[10px] text-smoke-dim tabular text-right">{dur}</div>
+      <button
+        type="button"
+        onClick={handleClick}
+        title={game.status === "running" ? "运行中, 无法删除" : confirming ? "再点一次确认删除" : "删除此局"}
+        disabled={game.status === "running" || deleting}
+        className={cn(
+          "h-7 inline-flex items-center justify-center gap-1.5 border font-mono text-[10px] tracking-[0.15em] uppercase",
+          "transition-all whitespace-nowrap",
+          confirming || deleting
+            ? "opacity-100 px-2.5 border-blood text-ivory bg-blood/80"
+            : "w-7 opacity-0 group-hover:opacity-100 focus:opacity-100 border-line text-smoke hover:text-blood hover:border-blood",
+          game.status === "running" && "cursor-not-allowed text-smoke-dim border-line hover:text-smoke-dim hover:border-line",
+        )}
+      >
+        {deleting ? (
+          <span>删除中…</span>
+        ) : confirming ? (
+          <>
+            <Trash2 className="w-3 h-3" strokeWidth={2} />
+            <span>确认删除</span>
+          </>
+        ) : (
+          <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+        )}
+      </button>
     </Link>
   );
 }

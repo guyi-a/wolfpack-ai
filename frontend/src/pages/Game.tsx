@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router";
-import useSWR from "swr";
+import useSWR, { useSWRConfig } from "swr";
 
 import { TopBar } from "@/components/TopBar";
 import { PlayerCard } from "@/components/PlayerCard";
 import { EventStream } from "@/components/EventStream";
 import { InnerViewPanel } from "@/components/InnerViewPanel";
 import { PhaseStepper } from "@/components/PhaseStepper";
-import { getGame, getAllHistories } from "@/lib/api";
+import { ReplayScrubber } from "@/components/ReplayScrubber";
+import { getGame, getAllHistories, apiUrl } from "@/lib/api";
 import { useGameStore } from "@/lib/game-store";
 import { useEventSource } from "@/lib/useEventSource";
 import type { ChannelEvent, InnerView, Player } from "@/lib/types";
@@ -15,6 +16,7 @@ import type { ChannelEvent, InnerView, Player } from "@/lib/types";
 export default function GamePage() {
   const { id } = useParams<{ id: string }>();
   const gameId = id ?? "";
+  const { mutate } = useSWRConfig();
 
   // 对局元信息 (players / status); 跑中轮询拿状态, 结束后停
   const {
@@ -26,6 +28,14 @@ export default function GamePage() {
       latest && (latest.status === "ended" || latest.status === "aborted") ? 0 : 3000,
   });
 
+  // 对局变为终态时, 戳一下 Home 那边的 list/stats cache, 让用户返回首页立刻看到最新胜率
+  useEffect(() => {
+    if (game?.status === "ended" || game?.status === "aborted") {
+      mutate("games-list");
+      mutate("games-stats");
+    }
+  }, [game?.status, mutate]);
+
   // SSE store
   const apply = useGameStore((s) => s.apply);
   const reset = useGameStore((s) => s.reset);
@@ -36,6 +46,8 @@ export default function GamePage() {
   const pastInners = useGameStore((s) => s.pastInners);
   const sseActive = useGameStore((s) => s.active);
   const ended = useGameStore((s) => s.ended);
+  const replayCursor = useGameStore((s) => s.replayCursor);
+  const setReplayCursor = useGameStore((s) => s.setReplayCursor);
 
   // 切换对局时清掉旧 store
   useEffect(() => {
@@ -43,7 +55,7 @@ export default function GamePage() {
   }, [gameId, reset]);
 
   useEventSource(
-    gameId ? `/api/games/${gameId}/stream` : null,
+    gameId ? apiUrl(`/games/${gameId}/stream`) : null,
     apply,
   );
 
@@ -58,20 +70,57 @@ export default function GamePage() {
 
   const [pinnedId, setPinnedId] = useState<string | null>(null);
 
+  // 复盘模式: status=ended 时启用 replayCursor 截断数据
+  const isReplay = game?.status === "ended" || game?.status === "aborted";
+  const effectiveCursor = isReplay ? replayCursor : null;
+
+  // cursor 截断的事件流 / 内心戏
+  const visibleEvents = useMemo(
+    () =>
+      effectiveCursor === null
+        ? events
+        : events.filter((e) => e.round <= effectiveCursor),
+    [events, effectiveCursor],
+  );
+  const visibleInners = useMemo(
+    () =>
+      effectiveCursor === null
+        ? pastInners
+        : pastInners.filter((iv) => iv.round <= effectiveCursor),
+    [pastInners, effectiveCursor],
+  );
+
+  // 所有已发生的 round 编号 (从 events 推导, 升序去重)
+  const allRounds = useMemo(() => {
+    const set = new Set<number>();
+    for (const e of events) set.add(e.round);
+    return [...set].sort((a, b) => a - b);
+  }, [events]);
+
   // 从事件流推导 round / phase
   const { currentRound, currentPhase } = useMemo(
-    () => derivePhase(events),
-    [events],
+    () => derivePhase(visibleEvents),
+    [visibleEvents],
   );
 
   // 从事件流推导 deadIds (跑中 game_player.alive 滞后, 用事件流兜底)
-  const deadInfo = useMemo(() => deriveDeaths(events), [events]);
+  const deadInfo = useMemo(() => deriveDeaths(visibleEvents), [visibleEvents]);
+
+  // 从公开事件反推最近一个有动作的 player (兜底 sseActive 在重进/重连后为空)
+  const lastActor = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const p = events[i].payload as Record<string, unknown>;
+      const candidate = p.speaker ?? p.voter;
+      if (typeof candidate === "string") return candidate;
+    }
+    return null;
+  }, [events]);
 
   if (gameErr) return <ErrorBox msg={`加载失败: ${gameErr.message}`} />;
   if (gameLoading || !game) return <LoadingBox />;
 
-  // active: pinned > SSE active > 第一个 player
-  const activeId = pinnedId ?? sseActive ?? game.players[0]?.player_id ?? "1";
+  // active: pinned > SSE active > 事件流最近 actor > 第一个 player
+  const activeId = pinnedId ?? sseActive ?? lastActor ?? game.players[0]?.player_id ?? "1";
   const activePlayer: Player =
     game.players.find((p) => p.player_id === activeId) ?? game.players[0];
 
@@ -87,10 +136,12 @@ export default function GamePage() {
   // 同步修正 activePlayer 显示
   const activePlayerWithDeath = playersWithDeaths.find((p) => p.player_id === activePlayer.player_id) ?? activePlayer;
 
-  // 该 player 全部历史 act
-  const playerViews = pastInners.filter((iv) => iv.player_id === activePlayer.player_id);
-  // 当前 live act (有 thinking 或 text 累积中)
-  const liveView = buildLiveView(activePlayer, currentRound, liveTokens, playerStates);
+  // 该 player 全部历史 act (复盘时被 cursor 截断)
+  const playerViews = visibleInners.filter((iv) => iv.player_id === activePlayer.player_id);
+  // 当前 live act (复盘模式禁用)
+  const liveView = isReplay
+    ? null
+    : buildLiveView(activePlayer, currentRound, liveTokens, playerStates);
 
   const togglePin = () => {
     if (pinnedId) setPinnedId(null);
@@ -109,6 +160,7 @@ export default function GamePage() {
         round={currentRound}
         phase={currentPhase}
         streaming={!ended && game.status === "running"}
+        showExport={isReplay}
       />
 
       <div className="grid grid-cols-[320px_1fr_460px] flex-1 min-h-0">
@@ -132,7 +184,7 @@ export default function GamePage() {
         </div>
 
         <div className="border-r border-line min-w-0 min-h-0 overflow-hidden">
-          <EventStream events={events} currentRound={currentRound} />
+          <EventStream events={visibleEvents} currentRound={currentRound} />
         </div>
 
         <div className="min-h-0 overflow-hidden">
@@ -146,11 +198,21 @@ export default function GamePage() {
         </div>
       </div>
 
-      <PhaseStepper
-        currentPhase={currentPhase}
-        pinnedPlayerId={pinnedId}
-        followMode={pinnedId === null}
-      />
+      {isReplay ? (
+        <ReplayScrubber
+          rounds={allRounds}
+          cursor={replayCursor}
+          onChange={setReplayCursor}
+          winner={game.winner}
+        />
+      ) : (
+        <PhaseStepper
+          currentPhase={currentPhase}
+          pinnedPlayerId={pinnedId}
+          followMode={pinnedId === null}
+          onResetFollow={() => setPinnedId(null)}
+        />
+      )}
     </div>
   );
 }

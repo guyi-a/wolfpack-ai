@@ -48,60 +48,90 @@
 - **EventBus (asyncio.Queue)** — 进程内 pub/sub, SSE 端点订阅
 - **loguru** — 日志
 
-### 前端 (规划中)
+### 前端
 - **Vite + React 19 + TypeScript**
 - **Tailwind 4 + radix-ui** (shadcn)
-- **Zustand** (多 store) + **react-router 7**
-- **motion / lucide-react / sonner / use-stick-to-bottom / react-markdown**
+- **Zustand** (多 store) + **react-router 7** (HashRouter, file:// 兼容)
+- **motion / lucide-react / sonner / use-stick-to-bottom / swr**
 - 视觉调性: **博弈室 × 实验室仪表盘** (暗调炭灰 + 狼血红/烛火金/月光青强调色, Fraunces 衬线 + JetBrains Mono)
+- 三栏对局页 (PlayerCard / EventStream / InnerView) + 真打字机 token 流 + 复盘 round tabs
 
 ### 交付形态
-- **Electron 桌面应用** (参考 krow-app)
+- **Electron 桌面应用** (参考 krow-app), macOS / Windows 双击 `.dmg` / `.exe` 即用
 - 后端打包: **Nuitka** 出单文件 binary, electron-builder `extraResources` 塞进 .dmg/.exe
+- 用户数据 (SQLite / 设置) 存到 `app.getPath('userData')` 跨平台标准目录
 
 ## 快速开始
 
 ### 环境要求
 - Python 3.12+
+- Node.js 20+ + pnpm (前端 / Electron 用)
 - macOS / Linux / Windows
-- Novita API key (https://novita.ai/)
+- Novita API key (https://novita.ai/) — 也可启动后在「设置」页填
 
-### 一键启动
+### 一键启动 (开发模式: backend + frontend + electron)
 
 ```bash
 git clone https://github.com/guyi-a/wolfpack-ai.git
 cd wolfpack-ai
 
-# 配置 API key
+# (可选) 提前填 key — 不填也能启动, 起来后在「设置」页填
 cp backend/.env.example backend/.env
-# 编辑 backend/.env, 填入 ANTHROPIC_API_KEY (用 Novita key)
 
-# 一键启动 (会自动创建 venv + 装依赖 + 起后端)
+# 一键启动: 自动建 venv + 装 pip 依赖 + 起 backend + 起 frontend Vite + 弹 Electron 窗口
 ./start-dev.sh        # Mac / Linux
 # 或 Windows:
 start-dev.bat
+```
+
+启动选项 (Mac/Linux):
+```bash
+./start-dev.sh --no-electron   # 只起 backend + frontend, 浏览器开 http://localhost:5173
+./start-dev.sh --no-frontend   # 只起 backend (调后端接口用)
 ```
 
 启动后访问:
 
 | URL | 用途 |
 |---|---|
+| Electron 窗口 | 主界面 (自动弹出) |
+| http://localhost:5173 | 前端 (浏览器 fallback) |
 | http://localhost:8080 | 后端根 |
 | http://localhost:8080/docs | Swagger API 文档 |
 | http://localhost:8080/healthz | 健康检查 |
-| http://localhost:8080/demo/game.html | **视觉调性 demo** (静态 HTML 预览) |
 
-### 手动启动 (开发用)
+**首次启动**: 进入主界面后点右上角齿轮按钮 → 进设置页填 Novita API key (推荐), 或者用 `backend/.env` 兜底.
+
+### 打包桌面应用 (Electron)
 
 ```bash
+# 1. 编译后端单文件 binary (Nuitka, 产物 backend/build-dist/wolfpack-server, ~54MB)
+cd electron
+pnpm build:backend
+
+# 2. 打包前端 + Electron + 后端 binary → .dmg (macOS) 或 .exe (Windows)
+pnpm package          # 产物在 electron/release/
+```
+
+### 手动启动 (调试用)
+
+```bash
+# 后端
 cd backend
 python3 -m venv venv
 source venv/bin/activate                 # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env                     # 编辑填 key
-python main.py                           # 跑在 8080, DEBUG=false
-# 或开发热重载:
-WOLFPACK_DEBUG=true python main.py
+WOLFPACK_DEBUG=true python main.py       # 跑在 8080
+
+# 前端 (新开一个终端)
+cd frontend
+pnpm install
+pnpm dev                                 # 跑在 5173
+
+# Electron (再开一个终端, 可选)
+cd electron
+pnpm install
+pnpm start                               # 弹窗加载 http://localhost:5173
 ```
 
 ## 主要 API
@@ -109,6 +139,8 @@ WOLFPACK_DEBUG=true python main.py
 ### 配置
 - `GET /models` — 已注册的 LLM 模型清单
 - `GET /games/default-config` — 默认 6 人板配置 (4 个模型混搭)
+- `GET /settings` — 当前 Anthropic 凭据 (api_key 明文回, 前端 input password 遮蔽)
+- `PUT /settings` — 更新 api_key / base_url, 立即同步到 `os.environ` 无需重启
 
 ### 对局
 - `POST /games` — 创建对局 (body = `GameConfig`, status=pending)
@@ -130,37 +162,47 @@ WOLFPACK_DEBUG=true python main.py
 wolfpack-ai/
 ├── README.md                    # 本文档
 ├── CLAUDE.md                    # 设计/架构决策备忘 (gitignore)
-├── start-dev.sh / .bat          # 一键启动脚本
+├── start-dev.sh / .bat          # 一键启动脚本 (backend + frontend + electron)
 ├── backend/
 │   ├── main.py                  # FastAPI 入口
 │   ├── requirements.txt
 │   ├── .env.example
 │   ├── alembic/                 # schema migration
+│   ├── scripts/                 # 打包脚本 (Nuitka)
+│   ├── build-dist/              # Nuitka 产物 (gitignore)
 │   ├── app/
-│   │   ├── server.py            # FastAPI app
-│   │   ├── routers/             # health / meta / game / stream
-│   │   ├── models/              # SQLAlchemy 表
+│   │   ├── server.py            # FastAPI app + lifespan (启动时加载 settings/sweep 僵尸局)
+│   │   ├── routers/             # health / meta / settings / game / stream
+│   │   ├── models/              # SQLAlchemy 表 (含 AppSettings / RuntimeSnapshot)
 │   │   ├── schemas/             # Pydantic 入出参
 │   │   ├── crud/                # ORM 操作封装
 │   │   ├── infra/               # settings / db / event_bus
-│   │   ├── core/                # game_state / channel / phase / judge / game_runtime
+│   │   ├── core/                # game_state / channel / phase / judge / runtime / runner
 │   │   └── agent/
 │   │       ├── base.py          # Player 基类 (async, astream_events, 推流式事件)
 │   │       ├── contexts/        # history / store / adapter (跨模型)
 │   │       ├── infra/           # llm_factory / agent_factory
 │   │       ├── config/          # models.json (支持模型清单)
 │   │       └── roles/           # villager / seer / witch / wolf / god
-│   ├── tests/                   # 8 个端到端 + 1 个流式 mock
+│   ├── tests/                   # 端到端 + 流式 mock + 断点续跑测试
 │   └── wolfpack-data/           # 运行时数据 (gitignore)
-└── examples/
-    └── frontend-demo/           # 视觉调性 HTML 预览 (gitignore, 仅本地参考)
+├── frontend/                    # Vite + React 19
+│   └── src/
+│       ├── pages/               # Home / Lobby / Game / Settings
+│       ├── components/          # PlayerCard / EventStream / InnerViewPanel / ReplayScrubber / ...
+│       ├── lib/                 # api / game-store / useEventSource / ...
+│       └── routes/router.tsx    # HashRouter (file:// 兼容)
+└── electron/                    # Electron 套壳 (Main + preload + builder 配置)
+    ├── src/main/                # spawn backend binary + 探活 + 窗口管理
+    └── electron-builder.yml     # 打包 .dmg / .exe
 ```
 
 ## 状态
 
-- ✅ **后端完整闭环** — 跑通完整对局, SQLite 持久化, SSE 实时流, 复盘 API
-- 🚧 **前端开发中** — 设计方案已定 (见 [CLAUDE.md](./CLAUDE.md) 前端设计方案节)
-- 📦 **Electron 套壳** — 后续, 前端起来后做
+- ✅ **后端完整闭环** — 跑通完整对局, SQLite 持久化, SSE 实时流, 复盘 API, 设置接口
+- ✅ **前端三栏对局页 + 复盘** — 真打字机 / inner_view 实时 / Home 胜率统计 / Lobby 配置 / Settings 凭据管理
+- ✅ **Electron 套壳 + Nuitka 打包** — 可出 `.dmg` 双击安装
+- 🚧 **断点续跑 / 复盘体验完善** — 进行中
 
 ## License
 

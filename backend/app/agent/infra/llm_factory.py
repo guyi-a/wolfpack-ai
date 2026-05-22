@@ -26,6 +26,10 @@ def _load_supported_models() -> list[str]:
         return json.load(f)["models"]
 
 
+class CredentialsMissingError(RuntimeError):
+    """ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL 没配置. 路由层 catch 后回 400 引导去 /settings."""
+
+
 def get_chat_model(model_name: str, **kwargs) -> ChatAnthropic:
     """按模型名返回 LangChain ChatAnthropic, 走 Novita anthropic 协议.
 
@@ -39,10 +43,20 @@ def get_chat_model(model_name: str, **kwargs) -> ChatAnthropic:
             f"未知模型 {model_name!r}. 已配置: {supported}. "
             f"请先在 {_MODELS_CONFIG.relative_to(_BACKEND_DIR)} 添加."
         )
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    if not api_key:
+        raise CredentialsMissingError(
+            "ANTHROPIC_API_KEY 未配置, 请前往「设置」页填写 Novita key."
+        )
+    if not base_url:
+        raise CredentialsMissingError(
+            "ANTHROPIC_BASE_URL 未配置, 请前往「设置」页填写."
+        )
     return ChatAnthropic(
         model=model_name,
-        api_key=os.environ["ANTHROPIC_API_KEY"],
-        base_url=os.environ["ANTHROPIC_BASE_URL"],
+        api_key=api_key,
+        base_url=base_url,
         **kwargs,
     )
 

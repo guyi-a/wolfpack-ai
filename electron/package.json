@@ -1,0 +1,26 @@
+{
+  "name": "wolfpack-electron",
+  "private": true,
+  "version": "0.2.1",
+  "description": "Wolfpack 桌面壳 (Electron Main + Preload).",
+  "main": "out/main/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && electron .",
+    "build:frontend": "cd ../frontend && pnpm build && cd ../electron && rm -rf frontend-dist && cp -r ../frontend/dist ./frontend-dist",
+    "build:backend": "cd .. && source backend/venv/bin/activate && bash backend/scripts/build_binary.sh",
+    "start:prod": "pnpm build:frontend && tsc && WOLFPACK_FORCE_PROD=1 electron .",
+    "package": "pnpm build:frontend && pnpm build && electron-builder --mac --config electron-builder.yml"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^40.1.0",
+    "electron-builder": "^26.8.1",
+    "typescript": "^5.9.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
+  }
+}

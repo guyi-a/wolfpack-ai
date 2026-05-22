@@ -8,10 +8,16 @@ routers 层只调用这里, 不直接写 SQLAlchemy. 便于:
 import datetime as dt
 from typing import Optional, Sequence
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.game import Game, GameEvent, GamePlayer, PlayerPrivateHistory
+from app.models.game import (
+    Game,
+    GameEvent,
+    GamePlayer,
+    PlayerPrivateHistory,
+    RuntimeSnapshot,
+)
 from app.schemas.game import GameConfig
 
 
@@ -85,6 +91,9 @@ async def mark_ended(
     game.winner = winner
     game.rounds_played = rounds_played
     game.ended_at = _utcnow()
+    await db.execute(
+        delete(RuntimeSnapshot).where(RuntimeSnapshot.game_id == game.id)
+    )
     await db.commit()
 
 
@@ -97,7 +106,18 @@ async def mark_aborted(
     game.status = "aborted"
     game.error_message = error
     game.ended_at = _utcnow()
+    await db.execute(
+        delete(RuntimeSnapshot).where(RuntimeSnapshot.game_id == game.id)
+    )
     await db.commit()
+
+
+async def delete_game(db: AsyncSession, game_id: int) -> int:
+    """硬删一局: game 行 + 级联 game_player / game_event / player_private_history / runtime_snapshot
+    (FK ondelete='CASCADE' 兜底). 返回删除的 game 行数 (0 或 1)."""
+    result = await db.execute(delete(Game).where(Game.id == game_id))
+    await db.commit()
+    return result.rowcount or 0
 
 
 # ============================================================================
@@ -304,3 +324,118 @@ async def list_all_private_histories(
     for row in result.scalars().all():
         out.setdefault(row.player_id, []).append(row)
     return out
+
+
+# ============================================================================
+# 统计聚合
+# ============================================================================
+
+
+async def fetch_stats_rows(
+    db: AsyncSession,
+) -> tuple[list[Game], list[tuple[int, str, str]]]:
+    """拉取统计所需原始数据.
+
+    Returns:
+        (all_games, player_rows)
+          all_games: 所有 Game 行 (含 pending/running)
+          player_rows: 所有 game_player 的 (game_id, role, model) 元组
+    """
+    games_result = await db.execute(select(Game))
+    games = list(games_result.scalars().all())
+
+    p_stmt = select(GamePlayer.game_id, GamePlayer.role, GamePlayer.model)
+    p_result = await db.execute(p_stmt)
+    player_rows = [(int(gid), str(role), str(model)) for gid, role, model in p_result.all()]
+    return games, player_rows
+
+
+# ============================================================================
+# RuntimeSnapshot — 断点续跑
+# ============================================================================
+
+
+async def upsert_snapshot(
+    db: AsyncSession,
+    game_id: int,
+    *,
+    round: int,
+    phase: str,
+    night_actions: dict,
+    eliminated_today: Optional[str],
+    deaths_announced_today: list[str],
+    potion_states: dict,
+    last_event_seq: int,
+    last_history_seqs: dict[str, int],
+    last_phase_name: str,
+) -> None:
+    """覆盖式写入 (每局只有一行, game_id 是 PK).
+
+    用 ORM 先 select 再 update / insert, SQLite 没有 ON CONFLICT 的便捷 SQLA 高层 API.
+    """
+    existing = await db.get(RuntimeSnapshot, game_id)
+    if existing is None:
+        existing = RuntimeSnapshot(game_id=game_id)
+        db.add(existing)
+    existing.round = round
+    existing.phase = phase
+    existing.night_actions = night_actions
+    existing.eliminated_today = eliminated_today
+    existing.deaths_announced_today = list(deaths_announced_today)
+    existing.potion_states = dict(potion_states)
+    existing.last_event_seq = last_event_seq
+    existing.last_history_seqs = dict(last_history_seqs)
+    existing.last_phase_name = last_phase_name
+    existing.updated_at = _utcnow()
+    await db.commit()
+
+
+async def load_snapshot(
+    db: AsyncSession, game_id: int
+) -> Optional[RuntimeSnapshot]:
+    return await db.get(RuntimeSnapshot, game_id)
+
+
+async def delete_snapshot(db: AsyncSession, game_id: int) -> None:
+    await db.execute(delete(RuntimeSnapshot).where(RuntimeSnapshot.game_id == game_id))
+    await db.commit()
+
+
+# ============================================================================
+# Restore 用: 删除超过 snapshot 高水位的脏行
+# ============================================================================
+
+
+async def delete_events_after_seq(
+    db: AsyncSession, game_id: int, last_seq: int
+) -> int:
+    """删除 game_event 里 seq > last_seq 的行 (restore 时清理脏数据)."""
+    result = await db.execute(
+        delete(GameEvent).where(
+            GameEvent.game_id == game_id, GameEvent.seq > last_seq
+        )
+    )
+    await db.commit()
+    return result.rowcount or 0
+
+
+async def delete_history_after_seq(
+    db: AsyncSession,
+    game_id: int,
+    player_id: str,
+    last_seq_count: int,
+) -> int:
+    """删除某 player 的 private_history 里 seq >= last_seq_count 的行.
+
+    Note: 我们的 history seq 从 0 开始计数, last_seq_count 是"已保留的行数",
+    所以是 seq >= count (而非 > count).
+    """
+    result = await db.execute(
+        delete(PlayerPrivateHistory).where(
+            PlayerPrivateHistory.game_id == game_id,
+            PlayerPrivateHistory.player_id == player_id,
+            PlayerPrivateHistory.seq >= last_seq_count,
+        )
+    )
+    await db.commit()
+    return result.rowcount or 0
